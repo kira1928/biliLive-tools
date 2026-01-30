@@ -1,6 +1,7 @@
 import fs from "fs-extra";
 import path from "path";
 import axios from "axios";
+import pLimit from "p-limit";
 
 import logger from "../utils/log.js";
 import { virtualRecordModel } from "../db/index.js";
@@ -186,9 +187,8 @@ const checkFolder = async (config: VirtualRecordConfig, folderPath: string, star
 
   // 处理每个新文件
   const port = appConfig.get("port");
-  for (const file of newRecords) {
-    await processFile(file, config, port);
-  }
+  const limit = pLimit(5);
+  await Promise.all(newRecords.map((file) => limit(() => processFile(file, config, port))));
 };
 
 /**
