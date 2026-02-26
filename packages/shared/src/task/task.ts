@@ -2,8 +2,7 @@ import path from "node:path";
 import fs from "fs-extra";
 import EventEmitter from "node:events";
 import { TypedEmitter } from "tiny-typed-emitter";
-// @ts-ignore
-import * as ntsuspend from "ntsuspend";
+import { createRequire } from "node:module";
 import kill from "tree-kill";
 import { DownloaderHelper as RangeDownloader } from "node-downloader-helper";
 
@@ -26,6 +25,22 @@ import type { Progress, BiliupConfig } from "@biliLive-tools/types";
 import type M3U8Downloader from "@renmu/m3u8-downloader";
 import type { DanmakuFactory } from "../danmu/danmakuFactory.js";
 import type { FlvCommand } from "./flvRepair.js";
+
+// 在 Windows 下按需懒加载 ntsuspend，避免在非 Windows 平台构建时报错
+const require = createRequire(import.meta.url);
+let _nt: any | null = null;
+const getNTSuspend = () => {
+  try {
+    // 仅在 Windows 平台尝试加载
+    if (!isWin32) return null;
+    if (_nt) return _nt;
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    _nt = require("ntsuspend");
+    return _nt;
+  } catch {
+    return null;
+  }
+};
 
 // 重新导出 AbstractTask 以保持向后兼容
 export { AbstractTask } from "./core/index.js";
@@ -208,8 +223,11 @@ export class FFmpegTask extends AbstractTask {
   pause() {
     if (this.status !== "running") return;
     if (isWin32) {
-      // @ts-ignore
-      ntsuspend.suspend(this.command.ffmpegProc.pid);
+      const nt = getNTSuspend();
+      if (nt?.suspend) {
+        // @ts-ignore
+        nt.suspend(this.command.ffmpegProc.pid);
+      }
     } else {
       this.command.kill("SIGSTOP");
     }
@@ -221,8 +239,11 @@ export class FFmpegTask extends AbstractTask {
   resume() {
     if (this.status !== "paused") return;
     if (isWin32) {
-      // @ts-ignore
-      ntsuspend.resume(this.command.ffmpegProc.pid);
+      const nt = getNTSuspend();
+      if (nt?.resume) {
+        // @ts-ignore
+        nt.resume(this.command.ffmpegProc.pid);
+      }
     } else {
       this.command.kill("SIGCONT");
     }
@@ -234,8 +255,11 @@ export class FFmpegTask extends AbstractTask {
   interrupt() {
     if (this.status === "completed" || this.status === "error") return;
     if (isWin32) {
-      // @ts-ignore
-      ntsuspend.resume(this.command.ffmpegProc.pid);
+      const nt = getNTSuspend();
+      if (nt?.resume) {
+        // @ts-ignore
+        nt.resume(this.command.ffmpegProc.pid);
+      }
     }
     // @ts-ignore
     this.command.ffmpegProc.stdin.write("q");
@@ -248,8 +272,11 @@ export class FFmpegTask extends AbstractTask {
     if (this.status === "completed" || this.status === "error" || this.status === "canceled")
       return;
     if (isWin32) {
-      // @ts-ignore
-      ntsuspend.resume(this.command.ffmpegProc.pid);
+      const nt = getNTSuspend();
+      if (nt?.resume) {
+        // @ts-ignore
+        nt.resume(this.command.ffmpegProc.pid);
+      }
     }
     this.command.kill("SIGKILL");
     log.warn(`task ${this.taskId} killed`);
