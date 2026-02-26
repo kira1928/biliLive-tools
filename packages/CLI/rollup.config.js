@@ -12,6 +12,7 @@ export default [
       "better-sqlite3",
       "shazamio-core",
       "music-segment-detector",
+      "fsevents",
     ],
     input: "src/index.ts",
     output: [
@@ -23,6 +24,11 @@ export default [
       },
     ],
     // inlineDynamicImports: true,
-    plugins: [typescript(), nodeResolve({ browser: false }), commonjs(), json()],
+    plugins: [
+      typescript(),
+      nodeResolve({ browser: false, exportConditions: ["default"] }),
+      commonjs(),
+      json(),
+    ],
   },
 ];
