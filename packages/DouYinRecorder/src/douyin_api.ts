@@ -78,13 +78,14 @@ let cookieCache: {
   cookies: string;
 };
 
-export const getCookie = async () => {
+export const getCookie = async (signal?: AbortSignal) => {
+  signal?.throwIfAborted();
   const now = new Date().getTime();
   // 缓存6小时
   if (cookieCache?.startTimestamp && now - cookieCache.startTimestamp < 6 * 60 * 60 * 1000) {
     return cookieCache.cookies;
   }
-  const res = await requester.get("https://live.douyin.com/");
+  const res = await requester.get("https://live.douyin.com/", { signal });
   if (!res.headers["set-cookie"]) {
     throw new Error("No cookie in response");
   }
@@ -138,6 +139,7 @@ async function getRoomInfoByUserWeb(
   secUserId: string,
   opts: {
     auth?: string;
+    signal?: AbortSignal;
   } = {},
 ): Promise<RoomInfo> {
   const url = `https://www.douyin.com/user/${secUserId}`;
@@ -146,9 +148,10 @@ async function getRoomInfoByUserWeb(
   let nonce = "068ea1c0100bb2c06590f";
 
   try {
-    nonce = await getNonce(url);
+    nonce = await getNonce(url, opts.signal);
   } catch (error) {
-    console.warn("获取nonce失败，使用默认值", error);
+    opts.signal?.throwIfAborted();
+    console.warn("获取nonce失败，使用默认值");
   }
 
   let cookies: string | undefined = undefined;
@@ -160,7 +163,8 @@ async function getRoomInfoByUserWeb(
     cookies = `__ac_nonce=${nonce}; __ac_signature=${signed}; __ac_referer=__ac_blank`;
   }
 
-  const res = await axios.get(url, {
+  const res = await requester.get(url, {
+    signal: opts.signal,
     headers: {
       "User-Agent": ua,
       cookie: cookies,
@@ -241,6 +245,7 @@ async function getRoomInfoByHtml(
   webRoomId: string,
   opts: {
     auth?: string;
+    signal?: AbortSignal;
   } = {},
 ): Promise<RoomInfo> {
   const url = `https://live.douyin.com/${webRoomId}`;
@@ -257,7 +262,8 @@ async function getRoomInfoByHtml(
     cookies = `__ac_nonce=${nonce}; __ac_signature=${signed}; __ac_referer=__ac_blank`;
   }
 
-  const res = await axios.get(url, {
+  const res = await requester.get(url, {
+    signal: opts.signal,
     headers: {
       "User-Agent": ua,
       cookie: cookies,
@@ -307,6 +313,7 @@ async function getRoomInfoByWeb(
   webRoomId: string,
   opts: {
     auth?: string;
+    signal?: AbortSignal;
   } = {},
 ): Promise<RoomInfo> {
   let cookies: string | undefined = undefined;
@@ -315,7 +322,7 @@ async function getRoomInfoByWeb(
   } else {
     // 抖音的 'webcast/room/web/enter' api 会需要 ttwid 的 cookie，这个 cookie 是由这个请求的响应头设置的，
     // 所以在这里请求一次自动设置。
-    cookies = await getCookie();
+    cookies = await getCookie(opts.signal);
   }
 
   const params: Record<any, any> = {
@@ -342,6 +349,7 @@ async function getRoomInfoByWeb(
   const res = await requester.get<EnterRoomApiResp>(
     `https://live.douyin.com/webcast/room/web/enter/?${query}`,
     {
+      signal: opts.signal,
       headers: {
         cookie: cookies,
         "User-Agent": ua,
@@ -376,6 +384,7 @@ async function getRoomInfoByMobile(
   secUserId: string | number,
   opts: {
     auth?: string;
+    signal?: AbortSignal;
   } = {},
 ): Promise<RoomInfo> {
   if (!secUserId) {
@@ -397,6 +406,7 @@ async function getRoomInfoByMobile(
     `https://webcast.amemv.com/webcast/room/reflow/info/`,
     {
       params,
+      signal: opts.signal,
       headers: {
         cookie: opts.auth,
       },
@@ -424,6 +434,7 @@ export async function getRoomInfo(
   webRoomId: string,
   opts: {
     auth?: string;
+    signal?: AbortSignal;
     doubleScreen?: boolean;
     api?: APIType;
     uid?: string | number;
@@ -441,6 +452,7 @@ export async function getRoomInfo(
   uid: string;
   api: RealAPIType;
 }> {
+  opts.signal?.throwIfAborted();
   let data: RoomInfo;
   let api = opts.api ?? "web";
 
@@ -466,6 +478,22 @@ export async function getRoomInfo(
   }
   // console.log(JSON.stringify(data, null, 2));
   const room = data.room;
+  // 用户页正常下播时没有 room；这是成功的状态查询，不应触发全局端点熔断。
+  if (!room && !data.living) {
+    return {
+      living: false,
+      roomId: webRoomId,
+      owner: data.nickname,
+      title: data.nickname,
+      streams: [],
+      sources: [],
+      avatar: data.avatar,
+      cover: "",
+      liveId: "",
+      uid: data.sec_uid,
+      api: data.api,
+    };
+  }
   assert(room, `No room data, id ${webRoomId}`);
   if (api === "userHTML") {
     return {
@@ -593,13 +621,14 @@ let nonceCache: {
 /**
  * 获取nonce
  */
-async function getNonce(url: string) {
+async function getNonce(url: string, signal?: AbortSignal) {
+  signal?.throwIfAborted();
   const now = new Date().getTime();
   // 缓存6小时
   if (nonceCache?.startTimestamp && now - nonceCache.startTimestamp < 6 * 60 * 60 * 1000) {
     return nonceCache.nonce;
   }
-  const res = await requester.get(url);
+  const res = await requester.get(url, { signal });
   if (!res.headers["set-cookie"]) {
     throw new Error("No cookie in response");
   }

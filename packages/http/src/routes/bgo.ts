@@ -1,10 +1,8 @@
 import Router from "@koa/router";
 
-// import type { RecorderAPI } from "../types/recorder.js";
 import { getInfo, getStream } from "@bililive-tools/douyin-recorder/stream.js";
 import { provider } from "@bililive-tools/douyin-recorder/index.js";
-import { title } from "process";
-import { format } from "path";
+import { bgoRequest } from "./bgoRequest.js";
 
 const router = new Router({
   prefix: "/bgo",
@@ -23,21 +21,18 @@ router.get("/live-info", async (ctx) => {
     ctx.status = 400;
     return;
   }
-  try {
-    const info = await getInfo(roomId as string, { api: "balance" });
+  await bgoRequest(ctx, async (signal) => {
+    const info = await getInfo(roomId as string, { api: "balance", signal });
     const body = {
       title: info.title,
       owner: info.owner,
-      living: info.living
+      living: info.living,
     };
     if (dev) {
       body["dev"] = info;
     }
-    ctx.body = body;
-  } catch (error) {
-    ctx.status = 500;
-    ctx.body = { error: (error as Error).message };
-  }
+    return body;
+  });
 });
 
 router.get("/stream-info", async (ctx) => {
@@ -47,8 +42,9 @@ router.get("/stream-info", async (ctx) => {
     ctx.status = 400;
     return;
   }
-  try {
+  await bgoRequest(ctx, async (signal) => {
     const info = await getStream({
+      signal,
       channelId: roomId as string,
       quality: 0,
       streamPriorities: [],
@@ -59,11 +55,8 @@ router.get("/stream-info", async (ctx) => {
     if (dev) {
       body["dev"] = info;
     }
-    ctx.body = body;
-  } catch (error) {
-    ctx.status = 500;
-    ctx.body = { error: (error as Error).message };
-  }
+    return body;
+  });
 });
 
 export default router;

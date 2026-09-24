@@ -1,254 +1,188 @@
 import type { APIType, APIEndpoint, APIEndpointStatus, LoadBalancerConfig } from "../types.js";
 import { getRoomInfo } from "../douyin_api.js";
+import { BalanceError, describeFailure } from "./errors.js";
 
-/**
- * API 负载均衡器类
- * 实现多个 API 接口的负载均衡调用，具备失败重试和禁用机制
- */
+type EndpointState = APIEndpointStatus & { generation: number; isProbing: boolean };
+
+/** 端点共享健康状态；熔断和手动重置通过代次隔离此前仍在途的结果。 */
 export class APILoadBalancer {
-  private endpoints: APIEndpointStatus[] = [];
+  private endpoints: EndpointState[] = [];
   private config: LoadBalancerConfig;
 
   constructor(config?: Partial<LoadBalancerConfig>) {
     this.config = {
-      maxFailures: 3, // 连续失败3次后禁用
-      blockDuration: 3 * 60 * 1000, // 禁用3分钟
-      retryMultiplier: 1.5, // 重试时间倍增
-      healthCheckInterval: 30 * 1000, // 30秒健康检查
+      maxFailures: 3,
+      blockDuration: 3 * 60 * 1000,
+      maxBlockDuration: 3 * 60 * 1000,
+      retryMultiplier: 1.5,
+      healthCheckInterval: 30 * 1000,
       ...config,
     };
-
-    // 初始化可用的 API 端点
-    this.initializeEndpoints();
-  }
-
-  /**
-   * 初始化 API 端点配置
-   */
-  private initializeEndpoints(): void {
+    this.updateConfig({});
     const defaultEndpoints: APIEndpoint[] = [
       { name: "web", priority: 2, weight: 1 },
       { name: "webHTML", priority: 1, weight: 1 },
       { name: "mobile", priority: 6, weight: 1 },
       { name: "userHTML", priority: 4, weight: 1 },
     ];
-
     this.endpoints = defaultEndpoints.map((endpoint) => ({
       endpoint,
       failureCount: 0,
       lastFailureTime: 0,
       isBlocked: false,
       nextRetryTime: 0,
+      generation: 0,
+      isProbing: false,
     }));
   }
 
-  /**
-   * 获取下一个可用的 API 端点
-   * 使用加权轮询算法，优先选择权重高且未被禁用的端点
-   */
-  private getNextEndpoint(): APIEndpointStatus | null {
+  private getNextEndpoint(candidates: EndpointState[]): EndpointState | undefined {
     const now = Date.now();
-
-    // 清理过期的禁用状态
-    this.endpoints.forEach((status) => {
-      if (status.isBlocked && now >= status.nextRetryTime) {
-        status.isBlocked = false;
-        status.failureCount = Math.max(0, status.failureCount - 1); // 部分恢复
-      }
-    });
-
-    // 获取可用的端点
-    const availableEndpoints = this.endpoints.filter((status) => !status.isBlocked);
-
-    if (availableEndpoints.length === 0) {
-      return null; // 所有端点都被禁用
-    }
-
-    // 按优先级和权重排序
-    availableEndpoints.sort((a, b) => {
-      if (a.endpoint.priority !== b.endpoint.priority) {
-        return a.endpoint.priority - b.endpoint.priority; // 优先级越小越好
-      }
-      return b.endpoint.weight - a.endpoint.weight; // 权重越大越好
-    });
-
-    // 使用加权随机选择
-    const totalWeight = availableEndpoints.reduce((sum, status) => sum + status.endpoint.weight, 0);
-    const random = Math.random() * totalWeight;
-
-    let currentWeight = 0;
-    for (const status of availableEndpoints) {
-      currentWeight += status.endpoint.weight;
-      if (random <= currentWeight) {
+    const available = candidates
+      .filter((s) => !s.isBlocked || (now >= s.nextRetryTime && !s.isProbing))
+      .sort((a, b) => a.endpoint.priority - b.endpoint.priority);
+    const totalWeight = available.reduce((sum, s) => sum + s.endpoint.weight, 0);
+    let choice = Math.random() * totalWeight;
+    for (const status of available) {
+      choice -= status.endpoint.weight;
+      if (choice < 0) {
+        // 在第一次 await 之前占用探测名额，冷却到期不直接恢复普通流量。
+        if (status.isBlocked) status.isProbing = true;
         return status;
       }
     }
-
-    // 如果加权选择失败，返回第一个可用的
-    return availableEndpoints[0];
+    return undefined;
   }
 
-  /**
-   * 记录 API 调用失败
-   */
-  private recordFailure(apiType: APIType, error: Error): void {
-    const status = this.endpoints.find((s) => s.endpoint.name === apiType);
-    if (!status) return;
-
-    status.failureCount++;
+  private recordFailure(status: EndpointState, generation: number): void {
+    if (status.generation !== generation) return;
+    status.failureCount = Math.min(this.config.maxFailures, status.failureCount + 1);
     status.lastFailureTime = Date.now();
-
-    // 如果失败次数超过阈值，禁用该端点
-    if (status.failureCount >= this.config.maxFailures) {
+    if (status.isProbing || status.failureCount >= this.config.maxFailures) {
+      status.generation++;
       status.isBlocked = true;
-      const blockDuration =
-        this.config.blockDuration *
-        Math.pow(this.config.retryMultiplier, status.failureCount - this.config.maxFailures);
-      status.nextRetryTime = Date.now() + blockDuration;
-
+      status.isProbing = false;
+      // 固定且有上限的冷却，迟到失败既不能继续计数，也不能延后本轮恢复时间。
+      status.nextRetryTime =
+        Date.now() + Math.min(this.config.blockDuration, this.config.maxBlockDuration);
       console.warn(
-        `API ${apiType} has been blocked due to ${status.failureCount} failures. Next retry at: ${(new Date(status.nextRetryTime).toISOString(), error.message)}`,
+        `API ${status.endpoint.name} has been blocked due to ${status.failureCount} failures. Next retry at: ${new Date(status.nextRetryTime).toISOString()}`,
       );
     }
   }
 
-  /**
-   * 记录 API 调用成功
-   */
-  private recordSuccess(apiType: APIType): void {
-    const status = this.endpoints.find((s) => s.endpoint.name === apiType);
-    if (!status) return;
-
-    // 成功调用后，减少失败计数
-    if (status.failureCount > 0) {
-      status.failureCount = Math.max(0, status.failureCount - 1);
-    }
-
-    // 如果之前被禁用，现在可以恢复
-    if (status.isBlocked && status.failureCount === 0) {
-      status.isBlocked = false;
-      status.nextRetryTime = 0;
-    }
+  private recordSuccess(status: EndpointState, generation: number): void {
+    if (status.generation !== generation) return;
+    if (status.isBlocked) status.generation++;
+    status.failureCount = 0;
+    status.lastFailureTime = 0;
+    status.isBlocked = false;
+    status.isProbing = false;
+    status.nextRetryTime = 0;
   }
 
-  /**
-   * 使用负载均衡策略调用 getRoomInfo
-   */
   async callWithLoadBalance(
     webRoomId: string,
-    opts: {
-      auth?: string;
-      doubleScreen?: boolean;
-      uid?: string | number;
-    } = {},
-  ): Promise<{
-    living: boolean;
-    roomId: string;
-    owner: string;
-    title: string;
-    streams: any[];
-    sources: any[];
-    avatar: string;
-    cover: string;
-    liveId: string;
-    uid: string;
-  }> {
-    const maxAttempts = this.endpoints.length;
-    let lastError: Error | null = null;
+    opts: Parameters<typeof getRoomInfo>[1] = {},
+  ): Promise<Awaited<ReturnType<typeof getRoomInfo>>> {
+    // mobile/userHTML 无有效 uid 时会在底层退回 web，不能把它们当作不同端点重试。
+    const eligible = this.endpoints.filter(
+      ({ endpoint }) =>
+        endpoint.weight > 0 &&
+        (!["mobile", "userHTML"].includes(endpoint.name) ||
+          (typeof opts.uid === "string" && opts.uid.length > 0)),
+    );
+    const tried = new Set<APIType>();
+    let lastError: BalanceError | undefined;
 
-    for (let attempt = 0; attempt < maxAttempts; attempt++) {
-      const endpointStatus = this.getNextEndpoint();
-
-      if (!endpointStatus) {
-        throw new Error("所有 API 端点都不可用，请稍后重试");
-      }
-
-      const apiType = endpointStatus.endpoint.name;
-
-      try {
-        const result = await getRoomInfo(webRoomId, {
-          ...opts,
-          api: apiType,
+    while (tried.size < eligible.length) {
+      opts.signal?.throwIfAborted();
+      const candidates = eligible.filter((s) => !tried.has(s.endpoint.name));
+      const status = this.getNextEndpoint(candidates);
+      if (!status) {
+        if (lastError) throw lastError;
+        const probing = candidates.some((s) => s.isProbing);
+        const retryAt = Math.min(...candidates.map((s) => s.nextRetryTime));
+        throw new BalanceError(probing ? "BGO_BALANCE_BUSY" : "BGO_BALANCE_COOLDOWN", {
+          ...(!probing && Number.isFinite(retryAt)
+            ? { retryAt: new Date(retryAt).toISOString() }
+            : {}),
         });
-
-        // 调用成功，记录成功状态
-        this.recordSuccess(apiType);
+      }
+      const api = status.endpoint.name;
+      const generation = status.generation;
+      tried.add(api);
+      try {
+        const result = await getRoomInfo(webRoomId, { ...opts, api });
+        opts.signal?.throwIfAborted();
+        // living:false 同样是成功查询，不能被计作接口失败。
+        this.recordSuccess(status, generation);
         return result;
       } catch (error) {
-        lastError = error as Error;
-        this.recordFailure(apiType, lastError);
-
-        console.warn(
-          `API ${apiType} failed (attempt ${attempt + 1}/${maxAttempts}):`,
-          lastError.message,
-        );
-
-        // 如果这是最后一次尝试，或者没有更多可用端点，则抛出错误
-        if (attempt === maxAttempts - 1) {
-          break;
+        if (opts.signal?.aborted) {
+          // 调用方取消不改变端点健康状态；等实际请求结束后才释放探测名额。
+          if (status.generation === generation) status.isProbing = false;
+          throw opts.signal.reason;
         }
+        this.recordFailure(status, generation);
+        lastError = new BalanceError("BGO_BALANCE_UPSTREAM", { api, ...describeFailure(error) });
+        console.warn("抖音 API 查询失败", {
+          room: webRoomId,
+          attempt: tried.size,
+          ...lastError.details,
+        });
       }
     }
-
-    throw new Error(`所有 API 调用都失败了。最后一个错误: ${lastError?.message || "未知错误"}`);
+    throw lastError ?? new BalanceError("BGO_BALANCE_BUSY");
   }
 
-  /**
-   * 获取当前端点状态（用于调试和监控）
-   */
   getEndpointStatus(): APIEndpointStatus[] {
-    return this.endpoints.map((status) => ({ ...status }));
+    return this.endpoints.map(({ generation, ...status }) => ({
+      ...status,
+      endpoint: { ...status.endpoint },
+    }));
   }
 
-  /**
-   * 手动重置某个端点的状态
-   */
   resetEndpoint(apiType: APIType): void {
     const status = this.endpoints.find((s) => s.endpoint.name === apiType);
-    if (status) {
-      status.failureCount = 0;
-      status.lastFailureTime = 0;
-      status.isBlocked = false;
-      status.nextRetryTime = 0;
-    }
+    if (!status) return;
+    status.generation++;
+    status.failureCount = 0;
+    status.lastFailureTime = 0;
+    status.isBlocked = false;
+    status.isProbing = false;
+    status.nextRetryTime = 0;
   }
 
-  /**
-   * 重置所有端点状态
-   */
   resetAllEndpoints(): void {
-    this.endpoints.forEach((status) => {
-      status.failureCount = 0;
-      status.lastFailureTime = 0;
-      status.isBlocked = false;
-      status.nextRetryTime = 0;
-    });
+    this.endpoints.forEach((s) => this.resetEndpoint(s.endpoint.name));
   }
 
-  /**
-   * 更新端点配置
-   */
   updateEndpointConfig(apiType: APIType, updates: Partial<APIEndpoint>): void {
+    if (updates.weight !== undefined && (!Number.isFinite(updates.weight) || updates.weight < 0)) {
+      throw new Error("端点权重必须是非负有限数值");
+    }
     const status = this.endpoints.find((s) => s.endpoint.name === apiType);
     if (status) {
-      Object.assign(status.endpoint, updates);
+      // 端点名称是状态标识，不允许通过配置把两个独立状态映射到同一端点。
+      if (updates.priority !== undefined) status.endpoint.priority = updates.priority;
+      if (updates.weight !== undefined) status.endpoint.weight = updates.weight;
     }
   }
 
-  /**
-   * 获取负载均衡器配置
-   */
   getConfig(): LoadBalancerConfig {
     return { ...this.config };
   }
 
-  /**
-   * 更新负载均衡器配置
-   */
   updateConfig(updates: Partial<LoadBalancerConfig>): void {
-    Object.assign(this.config, updates);
+    const config = { ...this.config, ...updates };
+    for (const key of ["maxFailures", "blockDuration", "maxBlockDuration"] as const) {
+      if (!Number.isSafeInteger(config[key]) || config[key] <= 0) {
+        throw new Error(`${key} 必须是正整数`);
+      }
+    }
+    this.config = config;
   }
 }
 
-// 创建全局单例实例
 export const globalLoadBalancer = new APILoadBalancer();
