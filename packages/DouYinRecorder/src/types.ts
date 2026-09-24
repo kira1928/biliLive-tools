@@ -12,14 +12,16 @@ export interface APIEndpointStatus {
   failureCount: number;
   lastFailureTime: number;
   isBlocked: boolean;
+  isProbing: boolean; // 冷却结束后是否已有恢复探测在途
   nextRetryTime: number;
 }
 
 export interface LoadBalancerConfig {
   maxFailures: number; // 最大失败次数，超过后进入禁用状态
   blockDuration: number; // 禁用时长（毫秒）
-  retryMultiplier: number; // 重试倍增系数
-  healthCheckInterval: number; // 健康检查间隔（毫秒）
+  maxBlockDuration: number; // 单轮冷却上限（毫秒）
+  retryMultiplier: number; // 兼容旧配置，固定冷却不再使用此参数
+  healthCheckInterval: number; // 兼容旧配置，恢复由请求触发，不启动定时探测
 }
 
 export interface RoomInfo {

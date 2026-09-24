@@ -16,6 +16,7 @@ export class LoadBalancerManager {
       weight: status.endpoint.weight,
       failureCount: status.failureCount,
       isBlocked: status.isBlocked,
+      isProbing: status.isProbing,
       lastFailureTime: status.lastFailureTime
         ? new Date(status.lastFailureTime).toISOString()
         : null,

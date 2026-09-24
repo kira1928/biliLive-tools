@@ -10,6 +10,7 @@ export async function getInfo(
     cookie?: string;
     api?: APIType;
     uid?: string | number;
+    signal?: AbortSignal;
   },
 ): Promise<{
   living: boolean;
@@ -30,6 +31,7 @@ export async function getInfo(
     info = await globalLoadBalancer.callWithLoadBalance(channelId, {
       auth: opts.cookie,
       uid: opts.uid,
+      signal: opts.signal,
     });
   } else {
     info = await getRoomInfo(channelId, opts ?? {});
@@ -58,6 +60,7 @@ export async function getStream(
     doubleScreen?: boolean;
     api?: APIType;
     uid?: string | number;
+    signal?: AbortSignal;
   },
 ) {
   let api = opts.api ?? "web";
@@ -70,6 +73,7 @@ export async function getStream(
     auth: opts.cookie,
     api: api,
     uid: opts.uid,
+    signal: opts.signal,
   });
   if (!info.living) {
     throw new Error("It must be called getStream when living");
