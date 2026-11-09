@@ -35,6 +35,7 @@ jobs:
     env: {}
 
     strategy:
+      fail-fast: false
       matrix:
         include: &cli_matrix
           - os: ubuntu
@@ -73,7 +74,6 @@ jobs:
         with:
           arch: armv7
           distro: ubuntu22.04
-          githubToken: ${{ github.token }}
           shell: /bin/bash
           install: |
             set -euxo pipefail
@@ -94,6 +94,7 @@ jobs:
             ln -sf "/usr/local/lib/nodejs/node-v${NODE_VER}-${ARCH}/bin/npx" /usr/local/bin/npx
             ln -sf "/usr/local/lib/nodejs/node-v${NODE_VER}-${ARCH}/bin/corepack" /usr/local/bin/corepack || true
             node -v
+            export PATH="/usr/local/lib/nodejs/node-v${NODE_VER}-${ARCH}/bin:$PATH"
             # Install the exact pnpm version declared by the workspace.
             PM_VERSION=$(node -p "require('./package.json').packageManager.split('@')[1].split('+')[0]")
             npm install --global "pnpm@$PM_VERSION"
@@ -166,6 +167,7 @@ jobs:
     env: {}
 
     strategy:
+      fail-fast: false
       matrix:
         include: *cli_matrix
 
@@ -205,7 +207,6 @@ jobs:
         with:
           arch: armv7
           distro: ubuntu22.04
-          githubToken: ${{ github.token }}
           shell: /bin/bash
           install: |
             set -euxo pipefail
@@ -226,6 +227,7 @@ jobs:
             ln -sf "/usr/local/lib/nodejs/node-v${NODE_VER}-${ARCH}/bin/npx" /usr/local/bin/npx
             ln -sf "/usr/local/lib/nodejs/node-v${NODE_VER}-${ARCH}/bin/corepack" /usr/local/bin/corepack || true
             node -v
+            export PATH="/usr/local/lib/nodejs/node-v${NODE_VER}-${ARCH}/bin:$PATH"
             # Install the exact pnpm version declared by the workspace.
             PM_VERSION=$(node -p "require('./package.json').packageManager.split('@')[1].split('+')[0]")
             npm install --global "pnpm@$PM_VERSION"
