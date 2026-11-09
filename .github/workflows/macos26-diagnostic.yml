@@ -1,0 +1,81 @@
+name: Diagnose bgo macOS 26 ARM64
+on:
+  push:
+    branches:
+      - diagnostics/bgo-4.1.0-macos26
+permissions:
+  contents: read
+jobs:
+  diagnose:
+    runs-on: macos-26
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: d1d8adae18ef4125201898ebb37b0af01db0cda5
+          persist-credentials: false
+      - name: Verify candidate and ARM64 host
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = d1d8adae18ef4125201898ebb37b0af01db0cda5
+          test "$(uname -m)" = arm64
+          sw_vers
+          xcodebuild -version
+      - uses: ./.github/actions/cli-setup
+      - uses: ./.github/actions/cli-build
+      - name: Inspect package deployment metadata without changing targets
+        if: ${{ always() }}
+        shell: bash
+        run: |
+          python3 - <<'PYCODE'
+          """Inspect, never rewrite, Mach-O load commands. Not an old-macOS runtime test."""
+          import hashlib, json, pathlib, re, subprocess, sys
+          root = pathlib.Path('packages/CLI/lib').resolve()
+          output = pathlib.Path('macos26-diagnostics')
+          output.mkdir(exist_ok=True)
+          def run(*args):
+              return subprocess.check_output(args, text=True, stderr=subprocess.STDOUT)
+          records = []
+          paths = sorted(p for p in root.rglob('*') if p.is_file())
+          paths.append(pathlib.Path(run('node', '-p', 'process.execPath').strip()))
+          for p in paths:
+              kind = run('file', '-b', str(p))
+              if 'Mach-O' not in kind:
+                  continue
+              architectures = run('lipo', '-archs', str(p)).strip()
+              record = {'path': str(p.relative_to(root)) if p.is_relative_to(root) else 'NODE_RUNTIME',
+                        'sha256': hashlib.sha256(p.read_bytes()).hexdigest(), 'architectures': architectures}
+              if 'arm64' in architectures.split():
+                  commands = run('otool', '-arch', 'arm64', '-l', str(p))
+                  record['load_commands'] = commands
+                  record['linked_libraries'] = run('otool', '-arch', 'arm64', '-L', str(p))
+                  versions = []
+                  for block in re.split(r'Load command \d+\n', commands):
+                      if re.search(r'cmd LC_BUILD_VERSION\b', block):
+                          value = re.search(r'\bminos\s+([0-9.]+)', block)
+                      elif re.search(r'cmd LC_VERSION_MIN_MACOSX\b', block):
+                          value = re.search(r'\bversion\s+([0-9.]+)', block)
+                      else:
+                          continue
+                      if value:
+                          versions.append(value.group(1))
+                  record['declared_minimum_macos'] = versions
+                  try:
+                      record['vtool'] = run('xcrun', 'vtool', '-arch', 'arm64', '-show-build', str(p))
+                  except subprocess.CalledProcessError as e:
+                      record['vtool_note'] = e.output
+              records.append(record)
+              print(record['path'], 'arch=' + architectures, 'minos=' + ','.join(record.get('declared_minimum_macos', [])))
+          report = {'note': 'Metadata inspection only. A low minos does not prove symbol/API compatibility or runtime support on older macOS.', 'files': records}
+          (output / 'macho-report.json').write_text(json.dumps(report, indent=2))
+          assert any(r['path'] != 'NODE_RUNTIME' and 'arm64' in r['architectures'].split() for r in records), 'No packaged ARM64 Mach-O binaries found'
+          assert all(r.get('declared_minimum_macos') for r in records if 'arm64' in r['architectures'].split()), 'Unknown deployment target requires investigation'
+          PYCODE
+      - name: Upload diagnostic metadata only
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos26-arm64-metadata-d1d8ada
+          path: macos26-diagnostics
+          if-no-files-found: error
+          retention-days: 7
