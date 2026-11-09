@@ -50,7 +50,14 @@ class ReleaseTests(unittest.TestCase):
                 if name != omit:
                     z.writestr(name, b'package bytes')
             if extra:
-                z.writestr(*extra)
+                entry, data = extra
+                if isinstance(entry, str):
+                    # Write the hostile bytes as supplied. ZipInfo construction
+                    # would otherwise normalize backslashes on Windows or NUL.
+                    raw_name = entry
+                    entry = zipfile.ZipInfo('placeholder')
+                    entry.filename = entry.orig_filename = raw_name
+                z.writestr(entry, data)
         return path
 
     def assets(self):
@@ -63,13 +70,29 @@ class ReleaseTests(unittest.TestCase):
             self.assertEqual(z.read('.hidden'), b'hidden')
 
     def test_archive_rejects_paths_and_missing_entry_points(self):
-        for name in ['../outside', '/absolute', 'C:/drive', 'a\\b', 'a//b', './a', 'a/../b']:
+        for name in ['../outside', '/absolute', 'C:/drive', 'a\\b', 'safe\x00hidden', 'a//b', './a', 'a/../b']:
             with self.subTest(name=name), self.assertRaises((RuntimeError, ValueError)):
                 p.validate_zip(self.archive(extra=(name, b'x')))
         with self.assertRaises((RuntimeError, ValueError)):
             p.validate_zip(self.archive(omit='appConfig.json'))
         with self.assertRaises((RuntimeError, ValueError)):
             p.validate_zip(self.archive(omit='appConfig.json', extra=('appConfig.json/', b'')))
+
+    def test_original_names_reject_windows_separator_and_nul_normalization(self):
+        for raw_name, normalized in [('a\\b', 'a/b'), ('safe\x00hidden', 'safe')]:
+            path = self.archive(extra=(raw_name, b'hostile'))
+            # Simulate Windows ZIP filename normalization on every host. This
+            # patches separators only, never skips the dangerous-name check.
+            with self.subTest(raw_name=raw_name), patch.object(zipfile.os, 'sep', '\\'), \
+                    patch.object(zipfile.os, 'altsep', '/'):
+                with zipfile.ZipFile(path) as archive:
+                    entry = archive.infolist()[-1]
+                    self.assertEqual(entry.orig_filename, raw_name)
+                    self.assertEqual(entry.filename, normalized)
+                    with self.assertRaisesRegex(RuntimeError, 'Unsafe original ZIP path'):
+                        p.safe_entries(archive)
+                with self.assertRaisesRegex(RuntimeError, 'Unsafe original ZIP path'):
+                    p.validate_zip(path)
 
     def test_archive_rejects_duplicates_conflicts_and_special_files(self):
         for extra in [('index.cjs', b'duplicate'), ('node_modules', b'file')]:
@@ -97,7 +120,7 @@ class ReleaseTests(unittest.TestCase):
             self.assertEqual(z.read('.hidden'), b'contents')
             if os.name != 'nt':
                 self.assertEqual((z.getinfo('bin/tool').external_attr >> 16) & 0o777, 0o755)
-        manifest = json.loads((output / 'manifest.json').read_text())
+        manifest = json.loads((output / 'manifest.json').read_text(encoding='utf-8'))
         self.assertEqual(manifest['sha256'], p.sha256(archive))
         self.assertEqual(manifest['size'], archive.stat().st_size)
         self.assertEqual(manifest['sha'], self.ctx.sha)
@@ -334,7 +357,7 @@ class ReleaseTests(unittest.TestCase):
                'GITHUB_EVENT_PATH': str(event)}
         inputs = {'is_release': 'true', 'release_tag': self.ctx.tag,
                   'release_name': 'Name $(touch unwanted) "quoted"'}
-        event.write_text(json.dumps({'inputs': inputs}))
+        event.write_text(json.dumps({'inputs': inputs}), encoding='utf-8')
         with patch.dict(os.environ, env), patch.object(p.subprocess, 'run') as check_ref:
             result = p.release_context()
             self.assertEqual(result.name, inputs['release_name'])
@@ -342,13 +365,13 @@ class ReleaseTests(unittest.TestCase):
         for changes in [{'release_tag': '$(touch unwanted)'}, {'release_tag': 'a\nb'},
                         {'release_tag': ''}, {'release_name': 'a\nb'},
                         {'force_replace': True}, {'force_replace': 'true'}, {'is_release': 'false'}]:
-            event.write_text(json.dumps({'inputs': {**inputs, **changes}}))
+            event.write_text(json.dumps({'inputs': {**inputs, **changes}}), encoding='utf-8')
             with self.subTest(changes=changes), patch.dict(os.environ, env), self.assertRaises((RuntimeError, ValueError)):
                 p.release_context()
-        event.write_text(json.dumps({'inputs': {**inputs, 'release_tag': 'a..b'}}))
+        event.write_text(json.dumps({'inputs': {**inputs, 'release_tag': 'a..b'}}), encoding='utf-8')
         with patch.dict(os.environ, env), self.assertRaises(p.subprocess.CalledProcessError):
             p.release_context()
-        event.write_text(json.dumps({'inputs': inputs}))
+        event.write_text(json.dumps({'inputs': inputs}), encoding='utf-8')
         for changes in [{'GITHUB_REPOSITORY': 'other/repo'}, {'GITHUB_REF': 'refs/heads/other'},
                         {'GITHUB_EVENT_NAME': 'push'}]:
             with self.subTest(changes=changes), patch.dict(os.environ, {**env, **changes}), self.assertRaises(RuntimeError):
@@ -430,7 +453,7 @@ class ReleaseTests(unittest.TestCase):
                 opener.assert_not_called()
 
     def test_workflow_security_contract(self):
-        workflow = (ROOT / '.github/workflows/for-bgo.yml').read_text()
+        workflow = (ROOT / '.github/workflows/for-bgo.yml').read_text(encoding='utf-8')
         self.assertIn('workflow_dispatch:', workflow)
         triggers = workflow.split('on:\n', 1)[1].split('\njobs:', 1)[0]
         self.assertEqual(set(re.findall(r'^  ([a-z_]+):$', triggers, re.M)), {'push', 'workflow_dispatch'})

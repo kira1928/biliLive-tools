@@ -83,6 +83,10 @@ def sha256(path):
 def safe_entries(archive):
     seen, files = set(), set()
     for entry in archive.infolist():
+        # ZipInfo normalizes Windows separators and truncates at NUL. Validate
+        # the original decoded member name before trusting the normalized name.
+        raw_name = entry.orig_filename
+        require('\\' not in raw_name and '\x00' not in raw_name, 'Unsafe original ZIP path')
         name = entry.filename
         require(name and '\\' not in name and '\x00' not in name and ':' not in name and
                 not name.startswith('/') and
