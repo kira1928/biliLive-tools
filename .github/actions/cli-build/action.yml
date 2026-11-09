@@ -1,5 +1,5 @@
 name: CLI Build
-description: Prefetch deps, install workspace package, build, and movePackage for CLI.
+description: Install workspace package dependencies, build, and movePackage for CLI.
 inputs:
   packageFilter:
     description: pnpm filter expression without suffix dots, e.g. "bililive-cli"
@@ -16,10 +16,6 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Prefetch deps
-      shell: bash
-      run: pnpm fetch
-
     - name: Install package deps
       shell: bash
       run: |

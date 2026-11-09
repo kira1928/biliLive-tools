@@ -100,8 +100,6 @@ jobs:
             npm install --global "pnpm@$PM_VERSION"
             node -v
             pnpm -v
-            # Prefetch only bililive-cli and its deps (avoid fetching whole monorepo)
-            pnpm -F "bililive-cli"... fetch
             pnpm -F "bililive-cli"... install --frozen-lockfile --prefer-offline
             # better-sqlite3 13 ships N-API prebuilds except for linux-arm.
             SQLITE_DIR=$(node -p "require('node:fs').realpathSync('packages/CLI/node_modules/better-sqlite3')")
@@ -233,8 +231,6 @@ jobs:
             npm install --global "pnpm@$PM_VERSION"
             node -v
             pnpm -v
-            # Prefetch only bililive-cli and its deps (avoid fetching whole monorepo)
-            pnpm -F "bililive-cli"... fetch
             pnpm -F "bililive-cli"... install --frozen-lockfile --prefer-offline
             # better-sqlite3 13 ships N-API prebuilds except for linux-arm.
             SQLITE_DIR=$(node -p "require('node:fs').realpathSync('packages/CLI/node_modules/better-sqlite3')")
