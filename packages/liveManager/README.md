@@ -12,11 +12,13 @@
 
 ## 支持的平台
 
-| 平台 | 包名                                |
-| ---- | ----------------------------------- |
-| B站  | `@bililive-tools/bilibili-recorder` |
-| 斗鱼 | `@bililive-tools/douyu-recorder`    |
-| 虎牙 | `@bililive-tools/huya-recorder`     |
+| 平台   | 包名                                |
+| ------ | ----------------------------------- |
+| B站    | `@bililive-tools/bilibili-recorder` |
+| 斗鱼   | `@bililive-tools/douyu-recorder`    |
+| 虎牙   | `@bililive-tools/huya-recorder`     |
+| 抖音   | `@bililive-tools/douyin-recorder`   |
+| 小红书 | `@bililive-tools/xhs-recorder`      |
 
 # 使用
 
@@ -30,8 +32,18 @@ const manager = createRecorderManager({
   providers: [provider],
   savePathRule: "D:\\录制\\{platforme}}/{owner}/{year}-{month}-{date} {hour}-{min}-{sec} {title}", // 保存路径，占位符见文档，支持 [ejs](https://ejs.co/) 模板引擎
   autoCheckInterval: 1000 * 60, // 自动检查间隔，单位秒
+  maxThreadCount: 3, // 检查并发数
+  waitTime: 0, // 检查后等待时间，单位毫秒
   autoRemoveSystemReservedChars: true, // 移除系统非法字符串
   biliBatchQuery: false, // B站检查使用批量接口
+  providerCheckConfig: {
+    // Bilibili 配置：高频检查，更多线程
+    Bilibili: {
+      autoCheckInterval: 5000, // 5秒检查一次
+      maxThreadCount: 5, // 最多5个并发线程
+      waitTime: 500, // 每次检查间隔0.5秒
+    },
+  },
 });
 
 // 不同provider支持的参数不尽相同，具体见相关文档
@@ -75,32 +87,39 @@ manager.startCheckLoop();
 ### setFFMPEGPath & setMesioPath
 
 ```ts
-import { setFFMPEGPath, setMesioPath } from "@bililive-tools/manager";
+import { setFFMPEGPath, setMesioPath, setBililivePath } from "@bililive-tools/manager";
 
 // 设置ffmpeg可执行路径
 setFFMPEGPath("ffmpeg.exe");
 
 // 设置mesio可执行文件路径
 setMesioPath("mesio.exe");
+
+// 设置录播姬录制器的可执行文件路径
+setBililivePath("BililiveRecorder.Cli.exe");
 ```
 
 ## savePathRule 占位符参数
 
 默认值为 `{platform}/{owner}/{year}-{month}-{date} {hour}-{min}-{sec} {title}`
 
-| 值          | 标签   |
-| ----------- | ------ |
-| {platform}  | 平台   |
-| {channelId} | 房间号 |
-| {remarks}   | 备注   |
-| {owner}     | 主播名 |
-| {title}     | 标题   |
-| {year}      | 年     |
-| {month}     | 月     |
-| {date}      | 日     |
-| {hour}      | 时     |
-| {min}       | 分     |
-| {sec}       | 秒     |
+| 值                | 标签                                       |
+| ----------------- | ------------------------------------------ |
+| {platform}        | 平台                                       |
+| {channelId}       | 房间号                                     |
+| {remarks}         | 备注                                       |
+| {owner}           | 主播名                                     |
+| {title}           | 标题                                       |
+| {year}            | 年                                         |
+| {month}           | 月                                         |
+| {date}            | 日                                         |
+| {hour}            | 时                                         |
+| {min}             | 分                                         |
+| {sec}             | 秒                                         |
+| {ms}              | 毫秒                                       |
+| {startTime}       | 分段开始时间，Date对象                     |
+| {recordStartTime} | 录制开始时间，Date对象                     |
+| {liveStartTime}   | 直播开始时间，Date对象，抖音同录制开始时间 |
 
 ## 事件
 

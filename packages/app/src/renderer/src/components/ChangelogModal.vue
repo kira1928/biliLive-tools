@@ -1,15 +1,19 @@
 <template>
-  <n-modal v-model:show="showModal" transform-origin="center" :auto-focus="false">
-    <n-card style="width: 800px" title="更新日志" :bordered="false">
+  <n-modal
+    v-model:show="showModal"
+    transform-origin="center"
+    :auto-focus="false"
+    :mask-closable="false"
+  >
+    <n-card style="max-width: 800px" title="更新日志" :bordered="false">
       <div>
         <p>
           <b
-            >如果你不知道如何使用本软件，请优先查看<a
-              href="https://www.bilibili.com/video/BV1Hs421M755/"
-              class="external"
-              target="_blank"
-              >帮助教程</a
-            >，你也可以在关于页面找到链接</b
+            >如果你不知道如何使用本软件，请优先查看
+            <a href="https://docs.irenmu.com/" class="external" target="_blank">文档</a> 或
+            <a href="https://www.bilibili.com/video/BV1Hs421M755/" class="external" target="_blank"
+              >视频教程 </a
+            >，绝大多数问题都能找到答案</b
           >
         </p>
         <p>如果你觉得本软件对你有帮助：</p>
@@ -47,7 +51,7 @@
       <template #footer>
         <div style="text-align: right">
           <n-button type="primary" style="margin-left: 10px" @click="close"
-            >我知道了(〃∀〃)</n-button
+            >我已严肃阅读(〃∀〃)</n-button
           >
         </div>
       </template>

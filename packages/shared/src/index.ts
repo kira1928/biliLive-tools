@@ -1,3 +1,4 @@
+import dns from "node:dns";
 import fs from "fs-extra";
 import { createContainer, asValue, asClass } from "awilix";
 import { default as checkDiskSpace } from "check-disk-space";
@@ -5,21 +6,37 @@ import { default as checkDiskSpace } from "check-disk-space";
 export * from "./presets/index.js";
 import { taskQueue, TaskQueue } from "./task/task.js";
 import { appConfig, AppConfig } from "./config.js";
-import { DanmuPreset, VideoPreset, FFmpegPreset } from "./presets/index.js";
+import { DanmuPreset, VideoPreset, FFmpegPreset, SubtitleStylePreset } from "./presets/index.js";
 import { setFfmpegPath } from "./task/video.js";
 import logger, { initLogger, setLogLevel } from "./utils/log.js";
-import { migrateBiliUser, checkAccountLoop } from "./task/bili.js";
+import { migrateBiliUser, checkBiliAccountLoop } from "./task/bili.js";
+import { checkDouyuAccountLoop } from "./recorder/douyu.js";
 import BiliCheckQueue from "./task/BiliCheckQueue.js";
-import { createInterval as checkSubLoop } from "./task/videoSub.js";
+import { createInterval as checkSubLoop } from "./video/videoSub.js";
 import { check as checkVirtualRecordLoop } from "./task/virtualRecord.js";
 import { createRecorderManager } from "./recorder/index.js";
 import { sendNotify } from "./notify.js";
 import { initDB } from "./db/index.js";
-import StatisticsService from "./db/service/statisticsService.js";
+import { statisticsService } from "./db/index.js";
 
 import type { GlobalConfig } from "@biliLive-tools/types";
 
-const container = createContainer();
+dns.setDefaultResultOrder("ipv4first");
+
+export interface GlobalContainer {
+  appConfig: AppConfig;
+  logger: Console;
+  globalConfig: GlobalConfig;
+  taskQueue: TaskQueue;
+  commentQueue: BiliCheckQueue;
+  danmuPreset: DanmuPreset;
+  videoPreset: VideoPreset;
+  ffmpegPreset: FFmpegPreset;
+  subtitleStylePreset: SubtitleStylePreset;
+  recorderManager: Awaited<ReturnType<typeof createRecorderManager>>;
+}
+
+const container = createContainer<GlobalContainer>();
 
 const init = async (config: GlobalConfig) => {
   appConfig.init(config.configPath, {
@@ -27,12 +44,16 @@ const init = async (config: GlobalConfig) => {
     ffprobePath: config.defaultFfprobePath,
     danmuFactoryPath: config.defaultDanmakuFactoryPath,
     mesioPath: config.defaultMesioPath,
+    bililiveRecorderPath: config.defaultBililiveRecorderPath,
+    audiowaveformPath: config.defaultAudioWaveformPath,
   });
   const logLevel = appConfig.get("logLevel");
   initLogger(config.logPath, logLevel);
 
-  appConfig.on("update", (data) => {
-    setLogLevel(data.logLevel);
+  appConfig.on("update", (newData, oldData) => {
+    if (newData.logLevel !== oldData.logLevel) {
+      setLogLevel(newData.logLevel);
+    }
   });
 
   initDB(config.userDataPath);
@@ -46,6 +67,7 @@ const init = async (config: GlobalConfig) => {
     danmuPreset: asClass(DanmuPreset).singleton(),
     videoPreset: asClass(VideoPreset).singleton(),
     ffmpegPreset: asClass(FFmpegPreset).singleton(),
+    subtitleStylePreset: asClass(SubtitleStylePreset).singleton(),
   });
   const recorderManager = await createRecorderManager(appConfig);
   container.register({
@@ -55,9 +77,10 @@ const init = async (config: GlobalConfig) => {
   await migrate();
   setFfmpegPath();
   try {
-    const commentQueue = container.resolve<BiliCheckQueue>("commentQueue");
+    const commentQueue = container.resolve("commentQueue");
     commentQueue.checkLoop();
-    checkAccountLoop();
+    checkBiliAccountLoop();
+    void checkDouyuAccountLoop();
     checkDiskSpaceLoop();
     checkSubLoop();
     checkVirtualRecordLoop();
@@ -65,7 +88,7 @@ const init = async (config: GlobalConfig) => {
     logger.error("初始化失败", error);
   }
   // 设置开始时间
-  StatisticsService.addOrUpdate({
+  statisticsService.addOrUpdate({
     where: { stat_key: "start_time" },
     create: { stat_key: "start_time", value: Date.now().toString() },
   });
@@ -91,7 +114,16 @@ const checkDiskSpaceLoop = async () => {
           const diskInfo = await checkDiskSpace(config?.webhook?.recoderFolder);
           if (diskInfo.free < threshold * 1024 * 1024 * 1024) {
             console.warn("录播姬磁盘空间不足，请及时处理");
-            sendNotify("空间不足", "录播姬磁盘空间不足，请及时处理");
+            sendNotify("空间不足", "录播姬磁盘空间不足，请及时处理", {
+              type: "diskSpaceCheck",
+              context: {
+                event: "disk_space_low",
+                eventLabel: "磁盘空间不足",
+                diskTarget: "bilirecorder",
+                thresholdGb: threshold,
+                path: config?.webhook?.recoderFolder,
+              },
+            });
           }
         }
       }
@@ -101,7 +133,16 @@ const checkDiskSpaceLoop = async () => {
           const diskInfo = await checkDiskSpace(config?.recorder?.savePath);
           if (diskInfo.free < threshold * 1024 * 1024 * 1024) {
             console.warn("biliLiveTools录制磁盘空间不足，请及时处理");
-            sendNotify("空间不足", "biliLiveTools录制磁盘空间不足，请及时处理");
+            sendNotify("空间不足", "biliLiveTools录制磁盘空间不足，请及时处理", {
+              type: "diskSpaceCheck",
+              context: {
+                event: "disk_space_low",
+                eventLabel: "磁盘空间不足",
+                diskTarget: "bililiveTools",
+                thresholdGb: threshold,
+                path: config?.recorder?.savePath,
+              },
+            });
           }
         }
       }
@@ -110,4 +151,4 @@ const checkDiskSpaceLoop = async () => {
   );
 };
 
-export { init, AppConfig, appConfig, TaskQueue, migrate, createRecorderManager, container };
+export { init, AppConfig, appConfig, TaskQueue, migrate, container };

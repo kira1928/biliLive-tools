@@ -29,6 +29,10 @@ runs:
         echo "Install flags: $FLAGS"
         pnpm -F "${{ inputs.packageFilter }}"... install $FLAGS
 
+    - name: Test production dependency packaging
+      shell: bash
+      run: node --test packages/CLI/test/copy_module.test.js
+
     - name: Build package
       shell: bash
       run: pnpm -F "${{ inputs.packageFilter }}"... build
@@ -36,3 +40,7 @@ runs:
     - name: Move package
       shell: bash
       run: pnpm -F "${{ inputs.packageFilter }}" movePackage
+
+    - name: Verify packaged CLI and native modules
+      shell: bash
+      run: node scripts/check-cli-package.js

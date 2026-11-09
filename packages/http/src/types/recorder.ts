@@ -3,6 +3,10 @@ import type {
   // RecorderManagerCreateOpts,
   RecordHandle,
 } from "@bililive-tools/manager";
+import type {
+  StreamerDetailQueryArgs as SharedStreamerDetailQueryArgs,
+  StreamerDetailResult as StreamerDetailResponse,
+} from "@biliLive-tools/shared/db/service/streamerDetailService.js";
 
 import type { Recorder as RecoderConfig } from "@biliLive-tools/types";
 
@@ -17,7 +21,13 @@ export interface PagedResp extends PagedArgs {
 
 export type ClientRecorder = Omit<
   Recorder<RecoderConfig["extra"]>,
-  "all" | "getChannelURL" | "checkLiveStatusAndRecord" | "recordHandle" | "toJSON" | "getLiveInfo"
+  | "all"
+  | "getChannelURL"
+  | "checkLiveStatusAndRecord"
+  | "recordHandle"
+  | "toJSON"
+  | "getLiveInfo"
+  | "appendTimeline"
 > & {
   channelURL: string;
   recordHandle?: Omit<RecordHandle, "stop">;
@@ -35,17 +45,18 @@ export interface LiveInfo {
   cover: string;
   channelId: string;
   living: boolean;
+  area?: string;
 }
 export type GetLiveInfoResp = LiveInfo[];
 
 export type GetRecordersArgs = {
   platform?: string;
-  recordStatus?: "recording" | "unrecorded";
+  status?: "recording" | "idle" | "check-error" | "title-blocked";
   name?: string;
   autoCheck?: string;
   page?: number;
   pageSize?: number;
-  sortField?: "living" | "state" | "monitorStatus";
+  sortField?: "living" | "state" | "monitorStatus" | "recordTime";
   sortDirection?: "asc" | "desc";
 };
 
@@ -94,25 +105,35 @@ export type UpdateRecorderArgs = Pick<
   | "disableProvideCommentsWhenRecording"
   | "saveGiftDanma"
   | "saveSCDanma"
+  | "saveDanmaStats2DB"
   | "segment"
   | "sendToWebhook"
   | "uid"
   | "saveCover"
+  | "convert2Mp4"
   | "qualityRetry"
   | "formatName"
   | "useM3U8Proxy"
+  | "customHost"
   | "codecName"
   | "titleKeywords"
+  | "segmentOnTitleChange"
   | "liveStartNotification"
+  | "chargeLiveNotification"
+  | "liveEndNotification"
   | "source"
   | "videoFormat"
   | "recorderType"
   | "cookie"
+  | "proxy"
   | "doubleScreen"
   | "onlyAudio"
   | "useServerTimestamp"
   | "handleTime"
   | "weight"
+  | "debugLevel"
+  | "api"
+  | "cookieMode"
 >;
 export type UpdateRecorderResp = ClientRecorder;
 
@@ -154,6 +175,21 @@ export type ResolveChannelResp = {
   avatar?: string;
 } | null;
 
+export interface BatchResolveChannelArgs {
+  channelURLs: string[];
+}
+export interface BatchResolveChannelResult {
+  url: string;
+  success: boolean;
+  data?: Omit<RecoderConfig, "id">;
+  error?: string;
+}
+export type BatchResolveChannelResp = {
+  results: BatchResolveChannelResult[];
+  successCount: number;
+  failedCount: number;
+};
+
 export interface GetManagerDefaultArgs {}
 // export type GetManagerDefaultResp = Omit<RecorderManagerCreateOpts, "providers">;
 
@@ -176,6 +212,50 @@ export type GetRecordResp = ClientRecord;
 
 export interface GetRecordExtraDataArgs {
   id: string;
+}
+
+export interface QueryStreamerDetailArgs
+  extends Omit<SharedStreamerDetailQueryArgs, "room_id" | "platform"> {
+  recorderId: RecoderConfig["id"];
+}
+
+export interface QueryStreamerDetailResp extends StreamerDetailResponse {
+  recorderInfo: ClientRecorder | null;
+}
+
+export interface QueryRecordCalendarArgs {
+  recorderId: RecoderConfig["id"];
+  startTime: number;
+  endTime: number;
+}
+
+export type QueryRecordCalendarResp = number[];
+
+export interface BatchStartRecordArgs {
+  ids: string[];
+}
+export interface BatchOperateResult {
+  id: string;
+  success: boolean;
+  error?: string;
+}
+export type BatchStartRecordResp = {
+  results: BatchOperateResult[];
+};
+
+export interface BatchStopRecordArgs {
+  ids: string[];
+}
+export type BatchStopRecordResp = {
+  results: BatchOperateResult[];
+};
+
+export interface GetRecentRecordFolderArgs {
+  id: RecoderConfig["id"];
+}
+
+export interface GetRecentRecordFolderResp {
+  folderPath: string;
 }
 
 export type RecorderAPI = {
@@ -215,6 +295,26 @@ export type RecorderAPI = {
     Args: CutRecordArgs;
     Resp: CutRecordResp;
   };
+  batchStartRecord: {
+    Args: BatchStartRecordArgs;
+    Resp: BatchStartRecordResp;
+  };
+  batchStopRecord: {
+    Args: BatchStopRecordArgs;
+    Resp: BatchStopRecordResp;
+  };
+  getRecentRecordFolder: {
+    Args: GetRecentRecordFolderArgs;
+    Resp: GetRecentRecordFolderResp;
+  };
+  queryStreamerDetail: {
+    Args: QueryStreamerDetailArgs;
+    Resp: QueryStreamerDetailResp;
+  };
+  queryRecordCalendar: {
+    Args: QueryRecordCalendarArgs;
+    Resp: QueryRecordCalendarResp;
+  };
   // getManager: {
   //   Args: GetManagerArgs;
   //   Resp: GetManagerResp;
@@ -226,6 +326,14 @@ export type RecorderAPI = {
   resolveChannel: {
     Args: ResolveChannelArgs;
     Resp: ResolveChannelResp;
+  };
+  resolve: {
+    Args: { url: string };
+    Resp?: Omit<RecoderConfig, "id">;
+  };
+  batchResolveChannel: {
+    Args: BatchResolveChannelArgs;
+    Resp: BatchResolveChannelResp;
   };
   // getManagerDefault: {
   //   Args: GetManagerDefaultArgs;

@@ -111,6 +111,7 @@
               item.status === 'completed' &&
               item.type !== TaskType.biliUpload &&
               item.type !== TaskType.bili &&
+              item.type !== TaskType.flvRepair &&
               item.output
             "
             :size="20"
@@ -178,10 +179,11 @@
       type="line"
       :percentage="item.progress"
       :indicator-placement="'outside'"
-      :show-indicator="false"
+      :show-indicator="true"
       style="--n-rail-height: 6px"
-      :title="`${item.progress.toFixed(2)}%`"
-    />
+    >
+      {{ item?.progress && item.progress.toFixed(1) }}%
+    </n-progress>
 
     <div v-if="showInfo && item.startTime" class="detail-info">
       <span>开始时间：{{ new Date(item.startTime).toLocaleString() }}</span>
@@ -192,6 +194,9 @@
             Number(((item.duration / 1000 / item.progress) * (100 - item.progress)).toFixed(0)),
           )
         }}
+      </span>
+      <span v-if="item.type === TaskType.biliUpload && item.extra?.fileSize !== undefined">
+        文件大小：{{ formatFileSize(item.extra.fileSize) }}
       </span>
       <span>{{ item.custsomProgressMsg }}</span>
     </div>
@@ -236,6 +241,21 @@ const props = withDefaults(defineProps<Props>(), {
 
 const item = computed(() => props.item);
 const isWeb = computed(() => window.isWeb);
+
+const formatFileSize = (size: number) => {
+  if (!Number.isFinite(size) || size < 0) return "--";
+  if (size < 1024) return `${size} B`;
+
+  const units = ["KB", "MB", "GB", "TB"];
+  let value = size / 1024;
+  let unitIndex = 0;
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex++;
+  }
+
+  return `${value.toFixed(value < 10 ? 1 : 0)} ${units[unitIndex]}`;
+};
 
 const confirm = useConfirm();
 const store = useQueueStore();
@@ -444,7 +464,7 @@ const editVideoPartName = async (taskId: string, item: Task) => {
       padding: 5px;
     }
     .btn:hover {
-      background: #e2e6ea;
+      background: var(--bg-hover);
       border-radius: 50%;
       // padding: 5px;
     }

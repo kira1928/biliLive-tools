@@ -9,6 +9,10 @@ export const qualityOptions = [
 // B站画质选项
 export const biliQualityOptions = [
   {
+    value: 25000,
+    label: "原画真彩(25000)",
+  },
+  {
     value: 10000,
     label: "原画(10000)",
   },
@@ -19,6 +23,10 @@ export const biliQualityOptions = [
   {
     value: 20000,
     label: "4K(20000)",
+  },
+  {
+    value: 15000,
+    label: "2K(15000)",
   },
   {
     value: 400,
@@ -218,6 +226,33 @@ export const douyinQualityOptions = [
   },
 ];
 
+export const tiktokQualityOptions = [
+  {
+    value: "origin",
+    label: "原画",
+  },
+  {
+    value: "uhd",
+    label: "蓝光",
+  },
+  {
+    value: "hd",
+    label: "超清",
+  },
+  {
+    value: "sd",
+    label: "高清",
+  },
+  {
+    value: "ld",
+    label: "标清",
+  },
+  {
+    value: "ao",
+    label: "音频流",
+  },
+];
+
 // b站流格式
 export const biliStreamFormatOptions = [
   {
@@ -229,29 +264,29 @@ export const biliStreamFormatOptions = [
     value: "flv",
   },
   {
-    label: "优先hls(ts)",
-    value: "hls",
-  },
-  {
     label: "优先hls(fmp4)",
     value: "fmp4",
+  },
+  {
+    label: "优先hls(ts)",
+    value: "hls",
   },
   {
     label: "强制flv",
     value: "flv_only",
   },
   {
-    label: "强制hls(ts)",
-    value: "hls_only",
-  },
-  {
     label: "强制hls(fmp4)",
     value: "fmp4_only",
+  },
+  {
+    label: "强制hls(ts)",
+    value: "hls_only",
   },
 ];
 
 // b站流编码
-export const streamCodecOptions = [
+export const biliStreamCodecOptions = [
   {
     value: "auto",
     label: "自动",
@@ -265,12 +300,36 @@ export const streamCodecOptions = [
     value: "hevc",
   },
   {
+    label: "优先av1",
+    value: "av1",
+  },
+  {
     label: "强制avc",
     value: "avc_only",
   },
   {
     label: "强制hevc",
     value: "hevc_only",
+  },
+  {
+    label: "强制av1",
+    value: "av1_only",
+  },
+];
+
+// 斗鱼流编码
+export const douyuStreamCodecOptions = [
+  {
+    value: "auto",
+    label: "自动",
+  },
+  {
+    label: "优先avc",
+    value: "avc",
+  },
+  {
+    label: "优先hevc",
+    value: "hevc",
   },
 ];
 
@@ -288,6 +347,14 @@ export const videoFormatOptions = [
     value: "mkv",
     label: "MKV",
   },
+  {
+    value: "flv",
+    label: "FLV",
+  },
+  {
+    value: "mp4",
+    label: "MP4",
+  },
 ];
 
 // 录制器
@@ -303,6 +370,26 @@ export const recorderTypeOptions = [
   {
     value: "mesio",
     label: "mesio优先",
+  },
+  {
+    value: "bililive",
+    label: "录播姬引擎优先",
+  },
+];
+
+// 录制调试等级
+export const recorderDebugLevelOptions = [
+  {
+    value: "none",
+    label: "关闭",
+  },
+  {
+    value: "basic",
+    label: "基础",
+  },
+  {
+    value: "verbose",
+    label: "详细",
   },
 ];
 
@@ -330,9 +417,44 @@ export const douyinStreamFormatOptions = [
   },
 ];
 
+export const douyinCookieModeOptions = [
+  { label: "全部", value: "all" },
+  { label: "仅直播流", value: "stream" },
+  { label: "仅弹幕", value: "danma" },
+];
+
+export const douyinApiTypeOptions = [
+  { label: "随机", value: "random" },
+  { label: "web接口", value: "web" },
+  { label: "mobile接口", value: "mobile" },
+  { label: "直播html解析", value: "webHTML" },
+  { label: "用户html解析", value: "userHTML" },
+  { label: "测试：负载均衡", value: "balance" },
+];
+
+export const huyaApiTypeOptions = [
+  { label: "自动", value: "auto" },
+  { label: "web", value: "web" },
+  { label: "mp", value: "mp" },
+  { label: "wup", value: "wup" },
+];
+
+export const douyuApiTypeOptions = [
+  { label: "自动", value: "auto" },
+  { label: "新接口", value: "newAPI" },
+  { label: "旧接口", value: "oldAPI" },
+];
+
+export const tiktokApiTypeOptions = [
+  { label: "自动", value: "auto" },
+  { label: "随机", value: "random" },
+  { label: "web接口", value: "web" },
+  { label: "直播html解析", value: "webHTML" },
+];
+
 const qualityRetry = {
-  text: "画质匹配重试次数",
-  tip: "根据次数强制查询匹配画质，在未选择原画的情况下，可能会导致开头漏录。匹配次数结束后如果无法匹配对应画质时会自动选择其他画质，-1为强制匹配画质",
+  text: "流匹配重试次数",
+  tip: "根据次数强制查询匹配画质及其他强制参数，在未选择原画的情况下，可能会导致开头漏录。匹配次数结束后如果无法匹配对应画质时会自动选择其他画质，-1为强制匹配",
 };
 const quality = {
   text: "画质",
@@ -341,13 +463,37 @@ const quality = {
 
 export const textInfo = {
   common: {
+    convert2Mp4: {
+      text: "转封装为MP4",
+      tip: "录制完成后将视频转封装为MP4格式，并删除原始文件，如果你需要使用webhook，那么请使用webhook的转封装功能",
+    },
     format: {
       text: "视频格式",
-      tip: "ffmpeg录制器：选择自动时，分段为ts，不分段为mp4<br/>mesio录制器：不支持指定",
+      tip: "ffmpeg录制器：选择自动时，分段为ts，不分段为fmp4<br/>FLV存在分辨率变化或参数变化会花屏，请尝试修复<br/><b>MP4容器如果出现突然中断，会导致视频损坏</b><br/>mesio和录播姬引擎不支持指定",
     },
     recorderType: {
       text: "录制器",
-      tip: "影响最底层的录制，自动选择默认使用ffmpeg，如果使用ffmpeg经常出现问题，如时间戳跳变，卡顿，音画不同步等，可以尝试切换mesio，<b>mesio目前仅推荐小规模测试使用</b>",
+      tip: "影响最底层的录制，自动选择默认使用ffmpeg。\n如果使用ffmpeg经常出现问题，如时间戳跳变，卡顿，音画不同步等，可以尝试切换mesio或录播姬引擎，录播姬引擎不支持只录制音频<b>目前仅推荐小规模测试使用</b>",
+    },
+    titleKeywords: {
+      text: "禁止标题关键词",
+      tip: "如果直播间标题包含这些关键词，则不会自动录制，多个关键词请用英文逗号分隔，或者使用正则表达式（如：/回放|录播/i），录制中的直播隔约每五分钟会查询接口检查，手动录制的不会被影响",
+      placeholder: "例如：回放,录播,重播 或 /回放|录播/i",
+    },
+    checkInterval: {
+      text: "录制检查间隔",
+      tip: "每隔设置的时间对所有监听直播间进行状态检查，太快容易被风控~",
+      placeholder: "默认从全局继承",
+    },
+    maxThreadCount: {
+      text: "并发数",
+      tip: "同时最多运行的检查任务数量，和 检查间隔 共同构成了录制的循环检查周期",
+      placeholder: "默认从全局继承",
+    },
+    waitTime: {
+      text: "等待时间",
+      tip: "检查任务完成后的等待时间",
+      placeholder: "默认从全局继承",
     },
   },
   bili: {
@@ -359,31 +505,78 @@ export const textInfo = {
       text: "避免hls自动分段",
       tip: "由于B站hls流存在过期时间，ffmpeg命令行无法处理导致会被一小时强制分段，通过本地代理可以避免分段，但是会增加网络请求以及可能的不稳定性",
     },
+    customHost: {
+      text: "自定义Host",
+      tip: "用于替换直播流链接中的host，用于使用自定义CDN或代理服务器，留空则使用B站原始host，此参数不存在校验，请自行注意可用性，可参考 https://rec.danmuji.org/dev/cdn-info/ 文档",
+    },
     quality: quality,
     qualityRetry: qualityRetry,
     formatName: {
       text: "流格式",
-      tip: "默认优先flv模式，其次ts，最后为fmp4，fmp4模式挺容易碎成一堆，我也不知道为什么",
+      tip: "默认优先flv模式，其fmp4，最后为ts",
     },
     codecName: {
       text: "流编码",
       tip: "默认优先avc模式",
     },
+    titleKeywords: {
+      text: "禁止标题关键词",
+      tip: "如果直播间标题包含这些关键词，则不会自动录制，多个关键词请用英文逗号分隔，或者使用正则表达式（如：/回放|录播/i），手动录制的不会被影响",
+      placeholder: "例如：回放,录播,重播 或 /回放|录播/i",
+    },
+    segmentOnTitleChange: {
+      text: "标题变更时分段",
+      tip: "监听到直播间标题变更时创建新分段；录播姬引擎支持无损分割，其他引擎会中断录制",
+    },
   },
   douyu: {
     qualityRetry: qualityRetry,
     quality: quality,
+    codecName: {
+      text: "流编码",
+      tip: "默认优先avc模式",
+    },
+    api: {
+      text: "请求接口",
+      tip: `自动使用新接口，除了新接口额外支持hevc之外，我也不知道有啥区别，但还是保留了此选项`,
+    },
+    cookie: {
+      text: "Cookie",
+      tip: "2026.9.21 日起，斗鱼web接口已经无法获取最高画质，以及录制流过期时间为五分钟，你需要添加cookie来避免问题",
+    },
   },
   huya: {
     qualityRetry: qualityRetry,
     quality: quality,
-  },
-  douyin: {
-    qualityRetry: qualityRetry,
-    quality: quality,
+    api: {
+      text: "请求接口",
+      tip: `为了星秀区而增加的参数，具体自己看文档吧~`,
+    },
     formatName: {
       text: "流格式",
       tip: "默认优先flv模式，其次hls",
+    },
+  },
+  douyin: {
+    qualityRetry: qualityRetry,
+    cookieMode: {
+      text: "Cookie模式",
+      tip: "全部：用于直播状态检测、取流和弹幕；仅流：用于直播状态检测和取流；仅弹幕：用于弹幕连接",
+    },
+    quality: {
+      text: "画质",
+      tip: "如果无法找到对应画质，会结合其他选项后选择更清晰的画质，<b>真原画画质可能导致PK花屏</b>",
+    },
+    formatName: {
+      text: "流格式",
+      tip: "默认优先flv模式，其次hls",
+    },
+    api: {
+      text: "请求接口",
+      tip: `不同的接口对应的底层不同，如果哪天用不了，你也可以切切看，mobile和用户html解析接口必须在3.1.0及以后版本使用才能生效，更多区别见文档。<br/>
+            mobile接口也许支持电台直播，该接口对IP有要求<br/>
+            web接口支持双屏直播参数<br/>
+            PS: mobile看起来更不容易触发风控，直播html接口是真容易触发风控`,
     },
   },
 } as const;

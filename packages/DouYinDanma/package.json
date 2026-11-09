@@ -1,6 +1,6 @@
 {
   "name": "douyin-danma-listener",
-  "version": "0.2.0",
+  "version": "0.4.2",
   "description": "douyin danma listener",
   "main": "./lib/index.js",
   "types": "./types/index.d.ts",
@@ -33,7 +33,11 @@
     "弹幕",
     "抖音"
   ],
-  "repository": "https://github.com/renmu123/biliLive-tools/tree/master/packages/DouYinDanma",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/renmu123/biliLive-tools",
+    "directory": "packages/DouYinDanma"
+  },
   "author": "renmu123",
   "license": "GPLV3",
   "dependencies": {
@@ -43,6 +47,7 @@
   },
   "devDependencies": {
     "@types/node": "*",
+    "@types/ws": "^8.5.13",
     "protobufjs-cli": "^1.1.3"
   }
 }

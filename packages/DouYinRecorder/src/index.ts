@@ -5,7 +5,8 @@ import {
   defaultToJSON,
   genRecorderUUID,
   genRecordUUID,
-  createBaseRecorder,
+  utils,
+  createDownloader,
 } from "@bililive-tools/manager";
 import type {
   Recorder,
@@ -17,7 +18,7 @@ import type {
 } from "@bililive-tools/manager";
 
 import { getInfo, getStream } from "./stream.js";
-import { ensureFolderExist, singleton } from "./utils.js";
+import { singleton } from "./utils.js";
 import { resolveShortURL, parseUser } from "./douyin_api.js";
 
 import DouYinDanmaClient from "douyin-danma-listener";
@@ -36,10 +37,12 @@ function createRecorder(opts: RecorderCreateOpts): Recorder {
 
     availableStreams: [],
     availableSources: [],
-    qualityMaxRetry: opts.qualityRetry ?? 0,
     qualityRetry: opts.qualityRetry ?? 0,
     useServerTimestamp: opts.useServerTimestamp ?? true,
+    cookieMode: opts.cookieMode ?? "all",
     state: "idle",
+    cache: null as any,
+    appendTimeline: null as any,
 
     getChannelURL() {
       return `https://live.douyin.com/${this.channelId}`;
@@ -53,7 +56,7 @@ function createRecorder(opts: RecorderCreateOpts): Recorder {
     async getLiveInfo() {
       const channelId = this.channelId;
       const info = await getInfo(channelId, {
-        cookie: this.auth,
+        auth: this.cookieMode === "danma" ? undefined : this.auth,
         uid: this.uid,
       });
       return {
@@ -67,6 +70,12 @@ function createRecorder(opts: RecorderCreateOpts): Recorder {
         quality: this.quality,
         streamPriorities: this.streamPriorities,
         sourcePriorities: this.sourcePriorities,
+        strictQuality: false,
+        auth: this.cookieMode === "danma" ? undefined : this.auth,
+        formatPriorities: this.formatPriorities,
+        doubleScreen: this.doubleScreen,
+        api: this.api as APIType,
+        uid: this.uid,
       });
       return res.currentStream;
     },
@@ -87,41 +96,51 @@ function createRecorder(opts: RecorderCreateOpts): Recorder {
   return recorderWithSupportUpdatedEvent;
 }
 
-const ffmpegOutputOptions: string[] = [
-  "-c",
-  "copy",
-  "-movflags",
-  "faststart+frag_keyframe+empty_moov",
-  "-min_frag_duration",
-  "10000000",
-];
-const ffmpegInputOptions: string[] = [
-  "-reconnect",
-  "1",
-  "-reconnect_streamed",
-  "1",
-  "-reconnect_delay_max",
-  "10",
-  "-rw_timeout",
-  "15000000",
-];
+const ffmpegOutputOptions: string[] = [];
+const ffmpegInputOptions: string[] = ["-rw_timeout", "10000000", "-timeout", "10000000"];
 
 const checkLiveStatusAndRecord: Recorder["checkLiveStatusAndRecord"] = async function ({
   getSavePath,
   banLiveId,
   isManualStart,
+  streamRetryHint,
 }) {
-  if (this.recordHandle != null) return this.recordHandle;
+  // 如果已经在录制中,只在需要检查标题关键词时才获取最新信息
+  if (this.recordHandle != null) {
+    const shouldStop = await utils.checkTitleKeywordsWhileRecording(
+      this,
+      isManualStart,
+      (channelId) =>
+        getInfo(channelId, {
+          auth: this.cookieMode === "danma" ? undefined : this.auth,
+          api: this.api as APIType,
+          uid: this.uid,
+        }),
+    );
+    if (shouldStop) {
+      return null;
+    }
+
+    // 已经在录制中，直接返回
+    return this.recordHandle;
+  }
+
+  // 获取直播间信息
+  let isLiveRadio = false;
   try {
     const liveInfo = await getInfo(this.channelId, {
-      cookie: this.auth,
+      auth: this.cookieMode === "danma" ? undefined : this.auth,
       api: this.api as APIType,
       uid: this.uid,
     });
     this.liveInfo = liveInfo;
-    this.state = "idle";
+    isLiveRadio = liveInfo.isLiveRadio;
+    this.emit("stateChange", { state: "idle" });
   } catch (error) {
-    this.state = "check-error";
+    this.emit("stateChange", {
+      state: "check-error",
+      msg: `检查失败，` + (error instanceof Error ? error.message : String(error)),
+    });
     throw error;
   }
 
@@ -133,46 +152,54 @@ const checkLiveStatusAndRecord: Recorder["checkLiveStatusAndRecord"] = async fun
   if (this.tempStopIntervalCheck) return null;
   if (!this.liveInfo.living) return null;
 
+  // 检查标题是否包含关键词
+  if (utils.checkTitleKeywordsBeforeRecord(this.liveInfo.title, this, isManualStart)) return null;
+
+  const qualityRetryLeft = (await this.cache.get("qualityRetryLeft")) ?? this.qualityRetry;
+  const strictQuality = utils.shouldUseStrictQuality(
+    qualityRetryLeft,
+    this.qualityRetry,
+    isManualStart,
+  );
+
   let res: Awaited<ReturnType<typeof getStream>>;
   try {
-    let strictQuality = false;
-    if (this.qualityRetry > 0) {
-      strictQuality = true;
-    }
-    if (this.qualityMaxRetry < 0) {
-      strictQuality = true;
-    }
-    if (isManualStart) {
-      strictQuality = false;
-    }
-    // TODO: 检查mobile接口处理双屏录播流
     res = await getStream({
       channelId: this.channelId,
       quality: this.quality,
       streamPriorities: this.streamPriorities,
       sourcePriorities: this.sourcePriorities,
       strictQuality: strictQuality,
-      cookie: this.auth,
+      auth: this.cookieMode === "danma" ? undefined : this.auth,
       formatPriorities: this.formatPriorities,
       doubleScreen: this.doubleScreen,
       api: this.api as APIType,
       uid: this.uid,
+      isLiveRadio: isLiveRadio,
+      preferAlternativeStream:
+        streamRetryHint?.preferAlternativeStream === true &&
+        streamRetryHint.liveId === this.liveInfo.liveId,
     });
     this.liveInfo.owner = res.owner;
     this.liveInfo.title = res.title;
     this.liveInfo.cover = res.cover;
     this.liveInfo.liveId = res.liveId;
     this.liveInfo.avatar = res.avatar;
-    this.liveInfo.startTime = new Date();
-  } catch (err) {
-    if (this.qualityRetry > 0) this.qualityRetry -= 1;
 
-    this.state = "check-error";
+    // 再检查一次，上一个接口可能不存在标题参数
+    if (utils.checkTitleKeywordsBeforeRecord(this.liveInfo.title, this, isManualStart)) return null;
+  } catch (err) {
+    if (qualityRetryLeft > 0) await this.cache.set("qualityRetryLeft", qualityRetryLeft - 1);
+
+    this.emit("stateChange", {
+      state: "check-error",
+      msg: `检查失败，` + (err instanceof Error ? err.message : String(err)),
+    });
     throw err;
   }
-  const { owner, title } = this.liveInfo;
+  const { owner, title, liveStartTime, recordStartTime } = this.liveInfo;
 
-  this.state = "recording";
+  this.emit("stateChange", { state: "recording" });
   const { currentStream: stream, sources: availableSources, streams: availableStreams } = res;
   this.availableStreams = availableStreams.map((s) => s.desc);
   this.availableSources = availableSources.map((s) => s.name);
@@ -180,12 +207,7 @@ const checkLiveStatusAndRecord: Recorder["checkLiveStatusAndRecord"] = async fun
   this.usedSource = stream.source;
 
   let isEnded = false;
-  let isCutting = false;
   const onEnd = (...args: unknown[]) => {
-    if (isCutting) {
-      isCutting = false;
-      return;
-    }
     if (isEnded) return;
     isEnded = true;
     this.emit("DebugLog", {
@@ -196,44 +218,44 @@ const checkLiveStatusAndRecord: Recorder["checkLiveStatusAndRecord"] = async fun
     this.recordHandle?.stop(reason);
   };
 
-  let recorderType: Parameters<typeof createBaseRecorder>[0] =
-    this.recorderType === "mesio" ? "mesio" : "ffmpeg";
-  const recorder = createBaseRecorder(
-    recorderType,
+  const downloader = createDownloader(
+    this.recorderType,
     {
       url: stream.url,
       outputOptions: ffmpegOutputOptions,
       inputOptions: ffmpegInputOptions,
       segment: this.segment ?? 0,
       getSavePath: (opts) =>
-        getSavePath({ owner, title: opts.title ?? title, startTime: opts.startTime }),
+        getSavePath({
+          owner,
+          title: opts.title ?? title,
+          startTime: opts.startTime,
+          liveStartTime: liveStartTime,
+          recordStartTime,
+          extraMs: opts.extraMs,
+        }),
       disableDanma: this.disableProvideCommentsWhenRecording,
       videoFormat: this.videoFormat ?? "auto",
+      debugLevel: this.debugLevel ?? "none",
+      onlyAudio: stream.onlyAudio,
       headers: {
-        Cookie: this.auth,
+        Origin: "https://live.douyin.com",
+        Referer: "https://live.douyin.com/",
+        // Cookie: this.auth,
       },
+      proxy: this.proxy,
     },
     onEnd,
     async () => {
-      const info = await getInfo(this.channelId);
+      const info = await getInfo(this.channelId, {
+        auth: this.cookieMode === "danma" ? undefined : this.auth,
+      });
       return info;
     },
   );
 
-  const savePath = getSavePath({
-    owner,
-    title,
-  });
-
-  try {
-    ensureFolderExist(savePath);
-  } catch (err) {
-    this.state = "idle";
-    throw err;
-  }
-
-  const handleVideoCreated = async ({ filename, title, cover }) => {
-    this.emit("videoFileCreated", { filename, cover });
+  const handleVideoCreated = async ({ filename, title, cover, rawFilename }) => {
+    this.emit("videoFileCreated", { filename, cover, rawFilename });
 
     if (title && this?.liveInfo) {
       this.liveInfo.title = title;
@@ -241,7 +263,7 @@ const checkLiveStatusAndRecord: Recorder["checkLiveStatusAndRecord"] = async fun
     if (cover && this?.liveInfo) {
       this.liveInfo.cover = cover;
     }
-    const extraDataController = recorder.getExtraDataController();
+    const extraDataController = downloader.getExtraDataController();
     extraDataController?.setMeta({
       room_id: this.channelId,
       platform: provider?.id,
@@ -251,29 +273,47 @@ const checkLiveStatusAndRecord: Recorder["checkLiveStatusAndRecord"] = async fun
       user_name: owner,
     });
   };
-  recorder.on("videoFileCreated", handleVideoCreated);
-  recorder.on("videoFileCompleted", ({ filename }) => {
-    this.emit("videoFileCompleted", { filename });
+  downloader.on("videoFileCreated", handleVideoCreated);
+  downloader.on("videoFileCompleted", (data) => {
+    this.emit("videoFileCompleted", data);
   });
-  recorder.on("DebugLog", (data) => {
+  downloader.on("DebugLog", (data) => {
     this.emit("DebugLog", data);
   });
-  recorder.on("progress", (progress) => {
+  downloader.on("progress", (progress) => {
     if (this.recordHandle) {
       this.recordHandle.progress = progress;
     }
     this.emit("progress", progress);
   });
 
+  // 礼物消息缓存管理
+  const giftMessageCache = new Map<
+    string,
+    {
+      gift: GiveGift;
+      timer: NodeJS.Timeout;
+    }
+  >();
+
+  // 礼物延迟处理时间(毫秒),可根据实际情况调整
+  const GIFT_DELAY = 5000;
+
   const client = new DouYinDanmaClient(this?.liveInfo?.liveId as string, {
-    cookie: this.auth,
+    cookie: this.cookieMode === "stream" ? undefined : this.auth,
   });
+  console.log("DouYinDanmaClient", this?.liveInfo?.liveId, this.cookieMode, this.auth);
   client.on("chat", (msg) => {
-    const extraDataController = recorder.getExtraDataController();
+    const extraDataController = downloader.getExtraDataController();
     if (!extraDataController) return;
+    let timestamp: number = Date.now();
+    if (this.useServerTimestamp && msg.eventTime) {
+      // 某些消息可能没有 eventTime 字段
+      timestamp = Number(msg.eventTime) * 1000;
+    }
     const comment: Comment = {
       type: "comment",
-      timestamp: this.useServerTimestamp ? Number(msg.eventTime) * 1000 : Date.now(),
+      timestamp: timestamp,
       text: msg.content,
       color: "#ffffff",
       sender: {
@@ -288,8 +328,41 @@ const checkLiveStatusAndRecord: Recorder["checkLiveStatusAndRecord"] = async fun
     this.emit("Message", comment);
     extraDataController.addMessage(comment);
   });
+  client.on("privilegeScreenChat", (msg) => {
+    const extraDataController = downloader.getExtraDataController();
+    if (!extraDataController) return;
+    const comment: Comment = {
+      type: "comment",
+      // 抖音飘屏没有时间戳数据，默认使用当前时间
+      timestamp: Date.now(),
+      text: msg.content,
+      color: "#e0c39c",
+      sender: {
+        uid: msg.user.id,
+        name: msg.user.nickName,
+      },
+    };
+    this.emit("Message", comment);
+    extraDataController.addMessage(comment);
+  });
+  client.on("screenChat", (msg) => {
+    const extraDataController = downloader.getExtraDataController();
+    if (!extraDataController) return;
+    const comment: Comment = {
+      type: "comment",
+      timestamp: this.useServerTimestamp ? Number(msg.eventTime) / 1000000 : Date.now(),
+      text: msg.content,
+      color: "#d7f6fc",
+      sender: {
+        uid: msg.user.id,
+        name: msg.user.nickName,
+      },
+    };
+    this.emit("Message", comment);
+    extraDataController.addMessage(comment);
+  });
   client.on("gift", (msg) => {
-    const extraDataController = recorder.getExtraDataController();
+    const extraDataController = downloader.getExtraDataController();
     if (!extraDataController) return;
     if (this.saveGiftDanma === false) return;
 
@@ -297,6 +370,7 @@ const checkLiveStatusAndRecord: Recorder["checkLiveStatusAndRecord"] = async fun
       Number(msg.common.createTime) > 9999999999
         ? Number(msg.common.createTime)
         : Number(msg.common.createTime) * 1000;
+
     const gift: GiveGift = {
       type: "give_gift",
       timestamp: this.useServerTimestamp ? serverTimestamp : Date.now(),
@@ -306,35 +380,58 @@ const checkLiveStatusAndRecord: Recorder["checkLiveStatusAndRecord"] = async fun
       color: "#ffffff",
       sender: {
         uid: msg.user.id,
-        name: msg.user.nickName,
+        name: msg?.user?.nickName || "unknown",
         // avatar: msg.ic,
         // extra: {
         //   level: msg.level,
         // },
       },
     };
-    this.emit("Message", gift);
-    extraDataController.addMessage(gift);
+
+    // 单独使用groupId并不可靠
+    const groupId = `${msg.groupId}_${msg.user.id}_${msg.giftId}`;
+
+    // 如果已存在相同 groupId 的礼物,清除旧的定时器
+    const existing = giftMessageCache.get(groupId);
+    if (existing) {
+      clearTimeout(existing.timer);
+    }
+
+    // 创建新的定时器
+    const timer = setTimeout(() => {
+      const cachedGift = giftMessageCache.get(groupId);
+      if (cachedGift) {
+        // 延迟时间到,添加最终的礼物消息
+        this.emit("Message", cachedGift.gift);
+        extraDataController.addMessage(cachedGift.gift);
+        giftMessageCache.delete(groupId);
+      }
+    }, GIFT_DELAY);
+
+    // 更新缓存
+    giftMessageCache.set(groupId, { gift, timer });
   });
   client.on("reconnect", (attempts: number) => {
+    this.appendTimeline({ text: `弹幕连接断开，正在重试: ${attempts}` });
     this.emit("DebugLog", {
       type: "common",
-      text: `douyin ${this.channelId}  danma has reconnect ${attempts}`,
+      text: `douyin ${this.channelId} danma has reconnect ${attempts}`,
     });
   });
   client.on("error", (err) => {
     this.emit("DebugLog", {
       type: "common",
-      text: `douyin ${this.channelId}  danma error: ${String(err)}`,
+      text: `douyin ${this.channelId} danma error: ${String(err)}`,
     });
   });
   client.on("init", (url) => {
     this.emit("DebugLog", {
       type: "common",
-      text: `douyin ${this.channelId}  danma init ${url}`,
+      text: `douyin ${this.channelId} danma init ${url}`,
     });
   });
   client.on("open", () => {
+    this.appendTimeline({ text: `弹幕连接已建立` });
     this.emit("DebugLog", {
       type: "common",
       text: `douyin ${this.channelId} danma open`,
@@ -364,47 +461,56 @@ const checkLiveStatusAndRecord: Recorder["checkLiveStatusAndRecord"] = async fun
     client.connect();
   }
 
-  const ffmpegArgs = recorder.getArguments();
-  recorder.run();
+  const downloaderArgs = downloader.getArguments();
+  downloader.run();
 
-  const cut = singleton<RecordHandle["cut"]>(async () => {
+  const cut = utils.singleton<RecordHandle["cut"]>(async () => {
     if (!this.recordHandle) return;
-    if (isCutting) return;
-    isCutting = true;
-    await recorder.stop();
-    recorder.createCommand();
-    recorder.run();
+    downloader.cut();
   });
 
   const stop = singleton<RecordHandle["stop"]>(async (reason?: string) => {
     if (!this.recordHandle) return;
-    this.state = "stopping-record";
+    this.emit("stateChange", { state: "stopping-record" });
 
     try {
+      // 清理所有礼物缓存定时器
+      for (const [_groupId, cached] of giftMessageCache.entries()) {
+        clearTimeout(cached.timer);
+        // 立即添加剩余的礼物消息
+        const extraDataController = downloader.getExtraDataController();
+        if (extraDataController) {
+          this.emit("Message", cached.gift);
+          extraDataController.addMessage(cached.gift);
+        }
+      }
+      giftMessageCache.clear();
+
       client.close();
-      await recorder.stop();
+      await downloader.stop();
     } catch (err) {
       this.emit("DebugLog", {
         type: "common",
-        text: `stop ffmpeg error: ${String(err)}`,
+        text: `stop record error: ${String(err)}`,
       });
     }
     this.usedStream = undefined;
     this.usedSource = undefined;
-
     this.emit("RecordStop", { recordHandle: this.recordHandle, reason });
     this.recordHandle = undefined;
     this.liveInfo = undefined;
-    this.state = "idle";
+    this.emit("stateChange", { state: "idle" });
+    this.cache.set("qualityRetryLeft", this.qualityRetry);
   });
 
   this.recordHandle = {
     id: genRecordUUID(),
     stream: stream.name,
     source: stream.source,
+    recorderType: downloader.type,
     url: stream.url,
-    ffmpegArgs,
-    savePath: savePath,
+    downloaderArgs,
+    savePath: downloader.videoFilePath,
     stop,
     cut,
   };

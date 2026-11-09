@@ -4,11 +4,14 @@ import recoderApi from "./recoder";
 import configApi from "./config";
 import taskApi from "./task";
 import commonApi from "./common";
+import fileBrowserApi from "./fileBrowser";
 import biliApi from "./bili";
+import douyuApi from "./douyu";
 import api from "./request";
 import videoApi from "./video";
 import recordHistoryApi from "./recordHistory";
 import danmaApi from "./danma";
+import aiApi from "./ai";
 
 import syncApi from "./sync";
 
@@ -18,10 +21,13 @@ export {
   configApi,
   taskApi,
   commonApi,
+  fileBrowserApi,
   biliApi,
+  douyuApi,
   api,
   videoApi,
   syncApi,
   recordHistoryApi,
   danmaApi,
+  aiApi,
 };

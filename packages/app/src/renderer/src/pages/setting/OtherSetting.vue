@@ -1,15 +1,12 @@
 <template>
   <div class="">
-    <n-form label-placement="left" :label-width="150">
-      <!-- <n-form-item>
-        <template #label>
-          <span class="inline-flex"> 保存文件夹 </span>
-        </template>
-        <n-input v-model:value="config.video.subSavePath" placeholder="请选择要保存的文件夹" />
-        <n-icon style="margin-left: 10px" size="26" class="pointer" @click="selectFolder">
-          <FolderOpenOutline />
-        </n-icon>
-      </n-form-item> -->
+    <n-form label-placement="left" :label-width="labelWidth">
+      <n-form-item label="主题"
+        ><n-select v-model:value="config.theme" :options="themeOptions" />
+      </n-form-item>
+      <n-form-item label="菜单栏显示" v-if="!isWeb">
+        <n-switch v-model:value="config.menuBarVisible" @click="toggleMenuBarVisible" />
+      </n-form-item>
       <n-form-item>
         <template #label>
           <Tip
@@ -19,16 +16,68 @@
         </template>
         <n-switch v-model:value="config.requestInfoForRecord" />
       </n-form-item>
+      <n-form-item>
+        <template #label>
+          <Tip text="B站上传文件名">控制文件名弹框是否出现</Tip>
+        </template>
+        <n-radio-group v-model:value="config.biliUploadFileNameType">
+          <n-radio value="ask">询问</n-radio>
+          <n-radio value="always">始终</n-radio>
+          <n-radio value="never">从不</n-radio>
+        </n-radio-group>
+      </n-form-item>
+      <n-form-item v-if="!isWeb">
+        <template #label>
+          <Tip text="切片独立窗口" tip="客户端使用子窗口打开切片页面"></Tip>
+        </template>
+        <n-switch v-model:value="config.cutPageInNewWindow" />
+      </n-form-item>
     </n-form>
   </div>
 </template>
 
 <script setup lang="ts">
-import type { AppConfig } from "@biliLive-tools/types";
+import { useBreakpoints } from "@renderer/hooks";
+import type { AppConfig, Theme } from "@biliLive-tools/types";
 
 const config = defineModel<AppConfig>("data", {
   default: () => {},
 });
+const { isMobile } = useBreakpoints();
+const labelWidth = computed(() => {
+  return isMobile.value ? "90px" : "150px";
+});
+const isWeb = computed(() => window.isWeb);
+
+const themeOptions = ref<{ label: string; value: Theme }[]>([
+  { label: "自动", value: "system" },
+  { label: "浅色", value: "light" },
+  { label: "深色", value: "dark" },
+]);
+
+const toggleMenuBarVisible = async () => {
+  if (!isWeb.value) return;
+  // 延迟一点时间，等待config.menuBarVisible更新
+  setTimeout(() => {
+    window.api.common.setMenuBarVisible(config.value.menuBarVisible);
+  }, 0);
+};
+
+// 测试用
+// watch(
+//   () => config.value.theme,
+//   (newVal) => {
+//     window?.api?.common?.setTheme(newVal);
+//     const THEME_KEY = "theme";
+//     if (newVal === "system") {
+//       localStorage.removeItem(THEME_KEY);
+//       document.documentElement.removeAttribute("data-theme");
+//     } else {
+//       localStorage.setItem(THEME_KEY, newVal);
+//       document.documentElement.setAttribute("data-theme", newVal);
+//     }
+//   },
+// );
 </script>
 
 <style scoped lang="less">

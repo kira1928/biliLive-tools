@@ -1,0 +1,24 @@
+services:
+  # 全栈镜像 - 包含前端和后端
+  fullstack:
+    image: renmu1234/bililive-tools
+    ports:
+      # 只需要暴露一个端口
+      - "3000:3000"
+    volumes:
+      # 映射的配置目录，用于持久化配置文件
+      - ./data:/app/data
+      # 存储文件的默认目录
+      - ./video:/app/video
+      # 字体目录
+      - ./fonts:/usr/share/fonts
+    environment:
+      # 登录密钥
+      - BILILIVE_TOOLS_PASSKEY=your_passkey
+      # 账户加密密钥
+      - BILILIVE_TOOLS_BILIKEY=your_bilikey
+      # 文件管理器可删除的目录
+      - BILILIVE_TOOLS_DELETE_DIRS=/app/video
+      # 中国时区
+      - TZ=Asia/Shanghai
+    restart: unless-stopped

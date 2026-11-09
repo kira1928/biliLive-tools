@@ -39,7 +39,7 @@ interface Options {
   streamPriorities: []; // 废弃
   sourcePriorities: []; // 废弃
   disableAutoCheck?: boolean; // 为 true 时 manager 将跳过自动检查
-  segment?: number; // 分段参数，单位分钟
+  segment?: number | string; // 分段参数，单位分钟，如果以"B","KB","MB","GB"结尾，会尝试使用文件大小分段，仅推荐在使用mesio录制引擎时使用
   disableProvideCommentsWhenRecording?: boolean; // 禁用弹幕录制
   saveGiftDanma?: boolean; // 保存礼物弹幕，包含舰长
   saveSCDanma?: boolean; // 保存SC
@@ -53,7 +53,10 @@ interface Options {
   m3u8ProxyUrl?: string; // 代理链接，文档待补充
   videoFormat?: "auto"; // 视频格式： "auto", "ts", "mkv" ，auto模式下, 分段使用 "ts"，不分段使用 "mp4"
   onlyAudio?: boolean; // 只录制音频，默认为否
-  recorderType?: "auto" | "ffmpeg" | "mesio"; // 底层录制器，使用mesio时videoFormat参数无效
+  recorderType?: "auto" | "ffmpeg" | "mesio" | "bililive"; // 底层录制器，使用mesio和bililive时videoFormat参数无效
+  debugLevel?: `verbose` | "basic"; // verbose参数时，录制器会输出更加详细的log
+  customHost?: string; // 自定义host来替换直播流的host
+  segmentOnTitleChange?: boolean; // 标题变更时分段，默认为false；bililive引擎无损切段，其他引擎中断录制
 }
 ```
 
@@ -61,15 +64,17 @@ interface Options {
 
 B站录制高画质需要登录，在无法匹配到画质时，会优先使用高画质
 
-| 画质 | 值    |
-| ---- | ----- |
-| 杜比 | 30000 |
-| 4K   | 20000 |
-| 原画 | 10000 |
-| 蓝光 | 400   |
-| 超清 | 250   |
-| 高清 | 150   |
-| 流畅 | 80    |
+| 画质     | 值    |
+| -------- | ----- |
+| 杜比     | 30000 |
+| 4K       | 20000 |
+| 原画真彩 | 25000 |
+| 2K       | 15000 |
+| 原画     | 10000 |
+| 蓝光     | 400   |
+| 超清     | 250   |
+| 高清     | 150   |
+| 流畅     | 80    |
 
 ### formatName
 
@@ -77,15 +82,15 @@ B站录制高画质需要登录，在无法匹配到画质时，会优先使用�
 
 能否录制flv下的hevc和你的ffmpeg版本有关
 
-| 解释        | 值        |
-| ----------- | --------- |
-| 等于flv     | auto      |
-| 优先使用flv | flv       |
-| 优先使用hls | hls       |
-| 只使用fmp4  | fmp4      |
-| 只使用flv   | flv_only  |
-| 只使用hls   | hls_only  |
-| 只使用fmp4  | fmp4_only |
+| 解释         | 值        |
+| ------------ | --------- |
+| 等于flv      | auto      |
+| 优先使用flv  | flv       |
+| 优先使用hls  | hls       |
+| 优先使用fmp4 | fmp4      |
+| 只使用flv    | flv_only  |
+| 只使用hls    | hls_only  |
+| 只使用fmp4   | fmp4_only |
 
 ### CodecName
 
@@ -96,8 +101,10 @@ B站录制高画质需要登录，在无法匹配到画质时，会优先使用�
 | 等于avc      | auto      |
 | 优先使用avc  | avc       |
 | 优先使用hevc | hevc      |
+| 优先使用av1  | av1       |
 | 只使用avc    | avc_only  |
 | 只使用hevc   | hevc_only |
+| 只使用av1    | av1_only  |
 
 ## 直播间ID解析
 

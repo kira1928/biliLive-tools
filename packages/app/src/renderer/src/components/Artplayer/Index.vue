@@ -9,14 +9,18 @@ import mpegts from "mpegts.js";
 
 import artplayerPluginAssJS from "artplayer-plugin-assjs";
 import artplayerPluginHeatmap from "./artplayer-plugin-heatmap";
+import artplayerPluginTimestamp from "./artplayer-timestamp";
 import artplayerPluginDanmuku from "artplayer-plugin-danmuku";
 import artplayerPluginHlsControl from "artplayer-plugin-hls-control";
+import artplayerPluginSubtitle from "./artplayer-plugin-subtitle";
+import artplayerPluginChapter from "./artplayer-plugin-chapter";
 
 const props = withDefaults(
   defineProps<{
     option: {
       fullscreen?: boolean;
       url?: string;
+      type?: string;
       string?: any;
       plugins?: {
         heatmap?: {
@@ -27,6 +31,20 @@ const props = withDefaults(
             color?: string;
             fillColor?: string;
           };
+        };
+        timestamp?: {
+          position?: { top?: string; bottom?: string; left?: string; right?: string };
+          visible?: boolean;
+          timestamp?: number;
+        };
+        subtitle?: {
+          subtitles?: Array<{
+            url?: string;
+            content?: string;
+            name: string;
+            type?: "srt" | "ass" | "vtt";
+            encoding?: string;
+          }>;
         };
       };
     };
@@ -42,6 +60,7 @@ const emits = defineEmits<{
   (event: "error", value: { error: any; reconnectTime: number }): void;
   (event: "seek", value: number): void;
   (event: "video:durationchange", value: number): void;
+  (event: "video:canplay", value: Artplayer): void;
 }>();
 
 const artRef = ref<HTMLDivElement | null>(null);
@@ -95,6 +114,25 @@ onMounted(async () => {
     if (props.plugins.includes("heatmap")) {
       plugins.push(artplayerPluginHeatmap([], props?.option?.plugins?.heatmap?.option ?? {}));
     }
+    if (props.plugins.includes("timestamp")) {
+      plugins.push(
+        artplayerPluginTimestamp({
+          position: { top: "10px", right: "10px" },
+          visible: false,
+          timestamp: 0,
+          ...props?.option?.plugins?.timestamp,
+        }),
+      );
+    }
+    if (props.plugins.includes("subtitle")) {
+      const plugin = await artplayerPluginSubtitle({
+        subtitles: props?.option?.plugins?.subtitle?.subtitles || [],
+      });
+      plugins.push(plugin);
+    }
+    if (props.plugins.includes("chapter")) {
+      plugins.push(artplayerPluginChapter({}));
+    }
   } else {
     plugins.push(
       artplayerPluginAssJS({
@@ -107,23 +145,35 @@ onMounted(async () => {
     return;
   }
   instance = new Artplayer({
-    url: "",
+    url: props?.option?.url ?? "",
+    type: props?.option?.type ?? "",
     isLive: props.isLive,
+    setting: true,
+    playbackRate: props.isLive ? false : true,
+    autoplay: props.isLive ? true : false,
     ...props.option,
     container: artRef.value,
     plugins: plugins,
+    subtitle: {
+      style: {
+        fontSize: "30px",
+      },
+    },
+    // setting: true,
+    // playbackRate: true,
     customType: {
       flv: (video, url, art) => {
         if (mpegts.isSupported()) {
+          // @ts-expect-error
           if (art.flv) art.flv.destroy();
 
           const flv = mpegts.createPlayer({
             type: "flv",
             url: url,
+            isLive: props.isLive,
           });
           flv.attachMediaElement(video);
           flv.load();
-          flv.play();
 
           art.flv = flv;
           art.on("destroy", () => flv.destroy());
@@ -133,6 +183,7 @@ onMounted(async () => {
       },
       m3u8: function playM3u8(video, url, art) {
         if (Hls.isSupported()) {
+          // @ts-expect-error
           if (art.hls) art.hls.destroy();
           const hls = new Hls();
           hls.loadSource(url);
@@ -160,6 +211,7 @@ ${tsFile}
         const m3u8URL = URL.createObjectURL(blob);
 
         if (Hls.isSupported()) {
+          // @ts-expect-error
           if (art.hls) art.hls.destroy();
           const hls = new Hls();
           hls.loadSource(m3u8URL);
@@ -174,11 +226,26 @@ ${tsFile}
       },
     },
   });
+  await nextTick();
 
+  // @ts-ignore
+  instance.artplayerPluginSubtitle = instance?.plugins?.artplayerPluginSubtitle;
   // @ts-ignore
   instance.artplayerPluginDanmuku = instance?.plugins?.artplayerPluginDanmuku;
   // @ts-ignore
   instance.artplayerPluginHeatmap = instance?.plugins?.artplayerPluginHeatmap;
+  // @ts-ignore
+  instance.artplayerTimestamp = instance?.plugins?.artplayerTimestamp;
+  // @ts-ignore
+  instance.artplayerPluginChapter = instance?.plugins?.artplayerPluginChapter;
+
+  // console.log("Artplayer instance created:", instance);
+
+  setTimeout(() => {
+    // TODO:这里可能未来会出现问题，artplayerPluginSubtitle是异步插件
+    // @ts-ignore
+    instance.artplayerPluginSubtitle = instance?.plugins?.artplayerPluginSubtitle;
+  }, 1000);
   await nextTick();
   emits("ready", instance);
   instance.on("error", (error, reconnectTime) => {
@@ -191,9 +258,12 @@ ${tsFile}
     const duration = Number(instance!.duration);
     emits("video:durationchange", duration);
   });
+  instance.on("video:canplay", () => {
+    emits("video:canplay", instance!);
+  });
 });
 
-const switchUrl = async (url: string, type: "" | "flv" = "") => {
+const switchUrl = async (url: string, type: "" | "flv" | "m3u8" = "") => {
   if (instance) {
     instance.type = type;
     instance?.switchUrl(url);
@@ -204,7 +274,41 @@ const switchUrl = async (url: string, type: "" | "flv" = "") => {
 
 const switchAss = async (subtitle?: string) => {
   if (instance) {
+    // @ts-ignore
     instance.plugins.artplayerPluginAssJS.switch(subtitle || "");
+  }
+};
+
+const switchDanmuku = async (danmuku: any[]) => {
+  if (instance) {
+    // @ts-ignore
+    instance.plugins.artplayerPluginDanmuku.config({
+      danmuku: danmuku,
+    });
+    // @ts-ignore
+    instance.plugins.artplayerPluginDanmuku.load();
+  }
+};
+
+// subtitle
+const switchSubtitle = async (names: string[]) => {
+  if (instance && instance.plugins.artplayerPluginSubtitle) {
+    // @ts-ignore
+    instance.plugins.artplayerPluginSubtitle.tracks(names);
+  }
+};
+
+const resetSubtitle = async () => {
+  if (instance && instance.plugins.artplayerPluginSubtitle) {
+    // @ts-ignore
+    instance.plugins.artplayerPluginSubtitle.reset();
+  }
+};
+
+const setSubtitleContent = async (content: string) => {
+  if (instance && instance.plugins.artplayerPluginSubtitle) {
+    // @ts-ignore
+    instance.plugins.artplayerPluginSubtitle.setContent(content);
   }
 };
 
@@ -214,6 +318,10 @@ defineExpose({
   switchUrl,
   video,
   switchAss,
+  switchDanmuku,
+  switchSubtitle,
+  resetSubtitle,
+  setSubtitleContent,
 });
 
 onBeforeUnmount(() => {

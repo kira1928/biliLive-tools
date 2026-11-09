@@ -1,0 +1,189 @@
+import type { NotificationTaskStatus } from "@biliLive-tools/types";
+
+import { sendNotify } from "../../notify.js";
+import { appConfig } from "../../config.js";
+import { TaskType } from "../../enum.js";
+import { TaskQueue } from "./TaskQueue.js";
+import { sendExternalTaskEvent } from "./externalTaskEvent.js";
+
+/**
+ * 全局任务队列实例
+ */
+export const taskQueue = new TaskQueue(appConfig);
+
+/**
+ * 发送任务通知
+ */
+export const sendTaskNotify = (event: NotificationTaskStatus, taskId: string): void => {
+  const task = taskQueue.queryTask(taskId);
+  if (!task) return;
+  const taskType = task.type;
+  let title = "";
+  let desp = "";
+  switch (event) {
+    case "success":
+      title = `成功：${task.name}`;
+      desp = `${task.name}结束\n\n开始时间：${new Date(task.startTime!).toLocaleString()}\n\n输出：${task.output}`;
+      break;
+    case "failure":
+      title = `错误：${task.name}`;
+      desp = `${task.name}出错\n\n开始时间：${new Date(task.startTime!).toLocaleString()}\n\n错误信息：${task.error}`;
+      break;
+  }
+
+  const extraContext =
+    task.extra && typeof task.extra === "object"
+      ? Object.fromEntries(
+          Object.entries(task.extra).filter(([, value]) => {
+            return ["string", "number", "boolean"].includes(typeof value);
+          }),
+        )
+      : {};
+
+  const notifyOptions = {
+    context: {
+      event: event === "success" ? "task_success" : "task_failure",
+      eventLabel: event === "success" ? "任务成功" : "任务失败",
+      taskId: task.taskId,
+      taskName: task.name,
+      taskType: taskType,
+      taskStatus: event,
+      taskOutput: task.output,
+      taskError: task.error ? String(task.error) : "",
+      startedAt: task.startTime ? new Date(task.startTime).toISOString() : "",
+      endedAt: task.endTime ? new Date(task.endTime).toISOString() : "",
+      durationMs: task.getDuration(),
+      ...extraContext,
+    },
+  };
+
+  const config = appConfig.getAll();
+  const taskConfig = config?.notification?.task;
+  switch (taskType) {
+    case TaskType.ffmpeg:
+      if (taskConfig.ffmpeg.includes(event)) {
+        sendNotify(title, desp, notifyOptions);
+      }
+      break;
+    case TaskType.danmu:
+      if (taskConfig.danmu.includes(event)) {
+        sendNotify(title, desp, notifyOptions);
+      }
+      break;
+    case TaskType.bili:
+      if (taskConfig.upload.includes(event)) {
+        sendNotify(title, desp, notifyOptions);
+      }
+      break;
+    case TaskType.biliDownload:
+      if (taskConfig.download.includes(event)) {
+        sendNotify(title, desp, notifyOptions);
+      }
+      break;
+    case TaskType.douyuDownload:
+      if (taskConfig.download.includes(event)) {
+        sendNotify(title, desp, notifyOptions);
+      }
+      break;
+    case TaskType.sync:
+      if (taskConfig.sync.includes(event)) {
+        sendNotify(title, desp, notifyOptions);
+      }
+      break;
+  }
+};
+
+// 注册全局任务事件监听器
+taskQueue.on("task-end", ({ taskId }) => {
+  sendTaskNotify("success", taskId);
+});
+taskQueue.on("task-error", ({ taskId }) => {
+  sendTaskNotify("failure", taskId);
+});
+
+taskQueue.on("task-start", (payload) => {
+  void sendExternalTaskEvent(taskQueue, "task-start", payload);
+});
+taskQueue.on("task-end", (payload) => {
+  void sendExternalTaskEvent(taskQueue, "task-end", payload);
+});
+taskQueue.on("task-error", (payload) => {
+  void sendExternalTaskEvent(taskQueue, "task-error", payload);
+});
+taskQueue.on("task-pause", (payload) => {
+  void sendExternalTaskEvent(taskQueue, "task-pause", payload);
+});
+taskQueue.on("task-resume", (payload) => {
+  void sendExternalTaskEvent(taskQueue, "task-resume", payload);
+});
+taskQueue.on("task-cancel", (payload) => {
+  void sendExternalTaskEvent(taskQueue, "task-cancel", payload);
+});
+
+/**
+ * 暂停任务
+ */
+export const handlePauseTask = (taskId: string): void => {
+  taskQueue.pause(taskId);
+};
+
+/**
+ * 恢复任务
+ */
+export const handleResumeTask = (taskId: string): void => {
+  taskQueue.resume(taskId);
+};
+
+/**
+ * 终止任务
+ */
+export const handleKillTask = (taskId: string): void => {
+  taskQueue.cancel(taskId);
+};
+
+/**
+ * 中断任务
+ */
+export const hanldeInterruptTask = (taskId: string): void => {
+  taskQueue.interrupt(taskId);
+};
+
+/**
+ * 获取所有任务列表
+ */
+export const handleListTask = () => {
+  return taskQueue.stringify(taskQueue.list());
+};
+
+/**
+ * 查询单个任务
+ */
+export const handleQueryTask = (taskId: string) => {
+  const task = taskQueue.queryTask(taskId);
+  if (task) {
+    return taskQueue.stringify([task])[0];
+  } else {
+    return null;
+  }
+};
+
+/**
+ * 启动任务
+ */
+export const handleStartTask = (taskId: string): void => {
+  taskQueue.start(taskId);
+};
+
+/**
+ * 移除任务
+ */
+export const handleRemoveTask = (taskId: string): void => {
+  taskQueue.remove(taskId);
+};
+
+/**
+ * 重启任务
+ */
+export const handleRestartTask = (taskId: string): void => {
+  taskQueue.restart(taskId);
+};

@@ -1,0 +1,172 @@
+# User API
+
+用户管理相关接口文档,用于管理 B 站账号信息。
+
+## 获取用户列表
+
+获取所有已添加的 B 站账号列表。
+
+**接口地址:** `GET /user/list`
+
+**请求参数:** 无
+
+**响应示例:**
+
+```json
+[
+  {
+    "uid": 123456789,
+    "name": "用户昵称",
+    "face": "https://i0.hdslb.com/bfs/face/xxx.jpg",
+    "expires": 1730419200
+  }
+]
+```
+
+**响应字段:**
+
+| 字段名  | 类型   | 说明                            |
+| ------- | ------ | ------------------------------- |
+| uid     | number | 用户 UID                        |
+| name    | string | 用户昵称                        |
+| face    | string | 用户头像 URL                    |
+| expires | number | Cookie 过期时间(Unix 时间戳,秒) |
+
+## 删除用户
+
+删除指定的 B 站账号。
+
+**接口地址:** `POST /user/delete`
+
+**请求参数:**
+
+| 参数名 | 类型   | 必填 | 说明     |
+| ------ | ------ | ---- | -------- |
+| uid    | number | 是   | 用户 UID |
+
+**请求示例:**
+
+```json
+{
+  "uid": 123456789
+}
+```
+
+**响应:** HTTP 200 表示删除成功
+
+## 更新用户信息
+
+更新指定用户的基本信息(昵称、头像等)。
+
+**接口地址:** `POST /user/update`
+
+**请求参数:**
+
+| 参数名 | 类型   | 必填 | 说明     |
+| ------ | ------ | ---- | -------- |
+| uid    | number | 是   | 用户 UID |
+
+**请求示例:**
+
+```json
+{
+  "uid": 123456789
+}
+```
+
+**响应:** HTTP 200 表示更新成功
+
+## 更新用户授权
+
+刷新指定用户的授权信息。
+
+**接口地址:** `POST /user/update_auth`
+
+**请求参数:**
+
+| 参数名 | 类型   | 必填 | 说明     |
+| ------ | ------ | ---- | -------- |
+| uid    | number | 是   | 用户 UID |
+
+**请求示例:**
+
+```json
+{
+  "uid": 123456789
+}
+```
+
+**响应:** HTTP 200 表示更新成功
+
+<!-- ## 获取用户 Cookie
+
+获取指定用户的完整 Cookie 字符串,需要签名验证。
+
+**接口地址:** `POST /user/get_cookie`
+
+**请求参数:**
+
+| 参数名    | 类型   | 必填 | 说明                                        |
+| --------- | ------ | ---- | ------------------------------------------- |
+| uid       | number | 是   | 用户 UID                                    |
+| timestamp | number | 是   | 当前时间戳(秒),与服务器时间差不能超过 10 秒 |
+| signature | string | 是   | 签名,使用 HMAC-SHA256 算法                  |
+
+**签名算法:**
+
+```javascript
+const crypto = require("crypto");
+
+const uid = 123456789;
+const timestamp = Math.floor(Date.now() / 1000);
+const secret = "r96gkr8ahc34fsrewr34";
+
+const signature = crypto.createHmac("sha256", secret).update(`${uid}${timestamp}`).digest("hex");
+```
+
+**请求示例:**
+
+```json
+{
+  "uid": 123456789,
+  "timestamp": 1730419200,
+  "signature": "abc123..."
+}
+```
+
+**响应示例:**
+
+```
+SESSDATA=xxx; bili_jct=xxx; DedeUserID=xxx; buvid3=xxx
+```
+
+**错误响应:**
+
+- `400 请求超时`: 时间戳与服务器时间差超过 10 秒
+- `400 签名无效`: 签名验证失败
+- `500 获取失败,请重试`: 获取 Cookie 失败
+
+::: warning 安全提示
+此接口涉及用户敏感信息,请妥善保管 Cookie 数据,不要泄露给他人。
+::: -->
+
+# 斗鱼账号
+
+## 创建二维码登录
+
+`POST /douyu/login` 创建登录会话，返回二维码内容 `url`、会话 `id` 和过期时间 `expiresAt`。
+
+## 轮询登录状态
+
+`GET /douyu/login/poll?id=:id` 返回 `scan`、`completed` 或 `error`。登录成功后会分别获取 passport 和主站登录态，并将账号加密保存。
+
+## 取消登录
+
+`POST /douyu/login/cancel`，请求体为 `{ "id": "登录会话 ID" }`。
+
+## 账号列表与退出
+
+`POST /douyu/user/validate` 使用主站 Cookie 请求粉丝牌接口校验有效性，请求体为 `{ "uid": 斗鱼 UID }`，返回 `{ "valid": true | false }`。校验不刷新 Cookie 或更新时间；接口故障会返回错误，不会被判定为失效。
+
+- `GET /douyu/user/list` 返回不包含 Cookie 的斗鱼账号列表，包含 `createdAt`（当前登录记录的创建时间）与 `updatedAt`（最近更新登录信息时间），均为 Unix 毫秒时间戳。同 UID 重新登录时同时重置创建时间和更新时间；自动刷新 Cookie 成功时只更新 `updatedAt`。
+- `POST /douyu/user/delete`，请求体为 `{ "uid": 斗鱼 UID }`。退出账号不会清除录制配置中的 UID 引用。

@@ -21,6 +21,16 @@ const get = async (id: string): Promise<Recorder> => {
   return res.data.payload;
 };
 
+/** 获取供播放器使用的直播流地址。 */
+const getStreamUrl = async (
+  id: string,
+): Promise<{
+  url: string | undefined;
+}> => {
+  const res = await request.post(`/recorder/${id}/stream`);
+  return res.data.payload;
+};
+
 const add = async (
   data: RecorderAPI["addRecorder"]["Args"],
 ): Promise<RecorderAPI["addRecorder"]["Resp"]> => {
@@ -47,14 +57,14 @@ const update = async (
 };
 
 const startRecord = async (id: string) => {
-  const res = await request.post(`/recorder/${id}/start_record`, {
+  const res = await request.post(`/recorder/${id}/start`, {
     id,
   });
   return res.data.payload;
 };
 
 const stopRecord = async (id: string) => {
-  const res = await request.post(`/recorder/${id}/stop_record`, {
+  const res = await request.post(`/recorder/${id}/stop`, {
     id,
   });
   return res.data.payload;
@@ -67,10 +77,43 @@ const cut = async (id: string) => {
   return res.data.payload;
 };
 
+const getRecentRecordFolder = async (
+  id: string,
+): Promise<RecorderAPI["getRecentRecordFolder"]["Resp"]> => {
+  const res = await request.get(`/recorder/${id}/recent-record-folder`);
+  return res.data.payload;
+};
+
+const batchStartRecord = async (
+  ids: string[],
+): Promise<RecorderAPI["batchStartRecord"]["Resp"]> => {
+  const res = await request.post(`/recorder/manager/batch_start_record`, { ids });
+  return res.data.payload;
+};
+
+const batchStopRecord = async (ids: string[]): Promise<RecorderAPI["batchStopRecord"]["Resp"]> => {
+  const res = await request.post(`/recorder/manager/batch_stop_record`, { ids });
+  return res.data.payload;
+};
+
 const resolveChannel = async (url: string): Promise<RecorderAPI["resolveChannel"]["Resp"]> => {
-  const res = await request.get(`/recorder/manager/resolveChannel`, {
+  const res = await request.get(`/recorder/manager/resolve-channel`, {
     params: { url },
   });
+  return res.data.payload;
+};
+
+const resolve = async (url: string): Promise<RecorderAPI["resolve"]["Resp"]> => {
+  const res = await request.get(`/recorder/manager/resolve`, {
+    params: { url },
+  });
+  return res.data.payload;
+};
+
+const batchResolveChannel = async (
+  channelURLs: string[],
+): Promise<RecorderAPI["batchResolveChannel"]["Resp"]> => {
+  const res = await request.post(`/recorder/manager/batchResolveChannel`, { channelURLs });
   return res.data.payload;
 };
 
@@ -78,21 +121,43 @@ const getLiveInfo = async (
   ids: string[],
   forceRequest: boolean,
 ): Promise<RecorderAPI["getLiveInfo"]["Resp"]> => {
-  const res = await request.post(`/recorder/manager/liveInfo`, { ids, forceRequest });
+  const res = await request.post(`/recorder/manager/live-info`, { ids, forceRequest });
+  return res.data.payload;
+};
+
+const queryStreamerDetail = async (
+  params: RecorderAPI["queryStreamerDetail"]["Args"],
+): Promise<RecorderAPI["queryStreamerDetail"]["Resp"]> => {
+  const res = await request.get(`/recorder/detail`, { params });
+  return res.data.payload;
+};
+
+const queryRecordCalendar = async (
+  params: RecorderAPI["queryRecordCalendar"]["Args"],
+): Promise<RecorderAPI["queryRecordCalendar"]["Resp"]> => {
+  const res = await request.get(`/recorder/calendar`, { params });
   return res.data.payload;
 };
 
 const recoder = {
   infoList,
   get,
+  getStreamUrl,
   add,
   remove,
   update,
   stopRecord,
   startRecord,
+  batchStartRecord,
+  batchStopRecord,
   resolveChannel,
+  resolve,
+  batchResolveChannel,
   getLiveInfo,
   cut,
+  getRecentRecordFolder,
+  queryStreamerDetail,
+  queryRecordCalendar,
 };
 
 export default recoder;

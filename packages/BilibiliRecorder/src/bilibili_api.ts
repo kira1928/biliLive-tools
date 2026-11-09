@@ -9,6 +9,10 @@ const requester = axios.create({
   // axios 会自动读取环境变量中的 http_proxy 和 https_proxy 并应用，
   // 但会导致请求报错 "Client network socket disconnected before secure TLS connection was established"。
   proxy: false,
+  headers: {
+    "User-Agent":
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36",
+  },
 });
 
 interface BilibiliResp<T = unknown> {
@@ -36,8 +40,10 @@ export async function getRoomInit(roomIdOrShortId: number) {
       live_time: number;
       // 是否加密
       encrypted: boolean;
-      // 普通直播间 / 付费直播间
+      // 普通直播间 / 付费直播间(充电直播)
       is_sp: 0 | 1;
+      // 直播间特殊类型，0 普通；1 充电直播(付费/DRM 加密)；其余为活动等特殊类型
+      special_type: number;
     }>
   >(`https://api.live.bilibili.com/room/v1/Room/room_init?id=${roomIdOrShortId}`);
 
@@ -104,6 +110,8 @@ export async function getStatusInfoByUIDs<UID extends number>(userIds: UID[]) {
           online: number;
           room_id: number;
           short_id: number;
+          // 父分区名称
+          area_v2_parent_name: string;
         }
       >
     >
@@ -197,6 +205,8 @@ export async function getRoomPlayInfo(
       short_id: number;
       live_status: LiveStatus;
       live_time: number;
+      // 特殊直播间标志数组(B站播放器据此判定 DRM 等)，203=DRM 加密直播
+      all_special_types?: number[];
       playurl_info: {
         conf_json: string;
         playurl: {
@@ -211,8 +221,8 @@ export async function getRoomPlayInfo(
       qn: opts.qn,
       // 0 http_stream, 1 http_hls
       protocol: "0,1",
-      // 0 avc, 1 hevc
-      codec: "0,1",
+      // 0 avc, 1 hevc，2 av1
+      codec: "0,1,2",
       // 0 flv, 1 ts, 2 fmp4
       format: "0,1,2",
       only_audio: opts.onlyAudio ? "1" : "0",

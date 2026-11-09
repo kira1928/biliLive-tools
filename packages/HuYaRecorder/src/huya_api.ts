@@ -1,4 +1,4 @@
-import axios from "axios";
+import { requester } from "./requester.js";
 
 import { utils } from "@bililive-tools/manager";
 import { assert, getFormatSources } from "./utils.js";
@@ -6,10 +6,6 @@ import { initInfo } from "./anticode.js";
 import type { Recorder } from "@bililive-tools/manager";
 
 import type { StreamResult, StreamProfile } from "./types.js";
-
-const requester = axios.create({
-  timeout: 10e3,
-});
 
 export async function getRoomInfo(
   roomIdOrShortId: string,
@@ -68,6 +64,11 @@ export async function getRoomInfo(
       sources.flv.push({
         name: item.sCdnType,
         url,
+        streamName: sStreamName,
+        presenterUid: item.lPresenterUid,
+        subChannelId: item.lSubChannelId,
+        channelId: item.lChannelId,
+        suffix: item.sFlvUrlSuffix,
       });
     }
     if (item.sHlsAntiCode && item.sHlsAntiCode.length > 0) {
@@ -85,6 +86,11 @@ export async function getRoomInfo(
       sources.hls.push({
         name: item.sCdnType,
         url,
+        streamName: sStreamName,
+        presenterUid: item.lPresenterUid,
+        subChannelId: item.lSubChannelId,
+        channelId: item.lChannelId,
+        suffix: item.sHlsUrlSuffix,
       });
     }
   }
@@ -93,6 +99,7 @@ export async function getRoomInfo(
   const formatSources = getFormatSources(sources, opts.formatPriorities);
   return {
     living: vMultiStreamInfo.length > 0 && data.gameStreamInfoList.length > 0,
+    api: "web",
     id: data.gameLiveInfo.profileRoom,
     owner: data.gameLiveInfo.nick,
     title: data.gameLiveInfo.introduction,
@@ -104,6 +111,7 @@ export async function getRoomInfo(
     startTime,
     liveId: utils.md5(`${roomIdOrShortId}-${startTime?.getTime()}`),
     gid: data.gameLiveInfo.gid,
+    area: data.gameLiveInfo.gameFullName,
   };
 }
 

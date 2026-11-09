@@ -1,11 +1,11 @@
-<!-- bili设置 -->
+﻿<!-- bili设置 -->
 <template>
   <div>
-    <n-form ref="formRef" label-width="120px" label-placement="left" label-align="right">
-      <n-form-item label="预设">
+    <n-form ref="formRef" :label-width="labelWidth" label-placement="left" label-align="right">
+      <n-form-item v-if="!isEditOnlyMode" label="预设">
         <n-select v-model:value="presetId" :options="uploaPresetsOptions" />
       </n-form-item>
-      <n-divider />
+      <n-divider v-if="!isEditOnlyMode" />
 
       <n-form-item>
         <template #label>
@@ -13,7 +13,7 @@
         </template>
         <image-crop v-model="options.config.cover"></image-crop>
       </n-form-item>
-      <n-form-item label="视频标题">
+      <n-form-item label="视频标题" style="margin-bottom: 10px">
         <template #label>
           <Tip :tip="titleTip" text="视频标题"></Tip>
         </template>
@@ -37,15 +37,50 @@
           >
         </template>
       </n-form-item>
+      <n-form-item label="分P标题" style="margin-bottom: 10px">
+        <template #label>
+          <Tip :tip="partTitleTip" text="分P标题"></Tip>
+        </template>
+        <n-input
+          ref="partTitleInput"
+          v-model:value="options.config.partTitleTemplate"
+          placeholder="留空则使用当前分P标题"
+          clearable
+          style="margin-right: 10px"
+          spellcheck="false"
+        />
+        <n-button
+          style="margin-right: 10px"
+          @click="previewPartTitle(options.config.partTitleTemplate || '')"
+          >预览</n-button
+        >
+        <template #feedback>
+          <span
+            v-for="item in partTitleList"
+            :key="item.value"
+            :title="item.label"
+            class="title-var"
+            @click="setPartTitleVar(item.value)"
+            >{{ item.value }}</span
+          >
+        </template>
+      </n-form-item>
       <n-form-item label="稿件类型">
         <n-radio-group v-model:value="options.config.copyright" name="radiogroup">
           <n-space>
             <n-radio :value="1"> 自制 </n-radio>
             <n-radio :value="2"> 转载 </n-radio>
+            <n-radio :value="3"> 其他 </n-radio>
           </n-space>
         </n-radio-group>
       </n-form-item>
-      <n-form-item v-if="options.config.copyright === 2" label="转载来源">
+      <n-form-item v-if="options.config.copyright === 2">
+        <template #label>
+          <Tip
+            tip="如果为空，在webhook使用时，会尝试会替换为直播间链接，如果无法匹配到，会被替换为直播间号"
+            text="转载来源"
+          ></Tip>
+        </template>
         <n-input
           v-model:value="options.config.source"
           placeholder="注明视频来源网址"
@@ -55,20 +90,17 @@
           show-count
         />
       </n-form-item>
-      <n-form-item>
-        <template #label>
-          <Tip
-            tip="仍在使用的分区，但是官方投稿已无法手动选择，这里你还是可以手动选的"
-            text="旧分区"
-          ></Tip>
-        </template>
-        <n-cascader
-          v-model:value="options.config.tid"
+      <n-form-item
+        label="创作声明"
+        v-if="options.config.copyright === 1 || options.config.copyright === 3"
+      >
+        <n-select
+          v-model:value="options.config.creationStatement"
+          :options="creationStatementList"
+          key-field="id"
           label-field="name"
           value-field="id"
-          :options="areaData"
-          check-strategy="child"
-          filterable
+          clearable
         />
       </n-form-item>
       <n-form-item label="分区">
@@ -92,7 +124,7 @@
           :loading="tagCreateLoading"
         />
       </n-form-item>
-      <n-form-item v-if="options.config.copyright === 1">
+      <n-form-item v-if="options.config.copyright === 1 || options.config.copyright === 3">
         <template #label>
           <Tip tip="话题也会占据一个tag栏~" text="话题"></Tip>
         </template>
@@ -110,16 +142,14 @@
         />
       </n-form-item>
 
-      <n-form-item>
+      <n-form-item style="margin-bottom: 10px">
         <template #label>
-          <Tip
-            text="视频简介"
-            tip="可以输入[暮色312]<10995238>来进行艾特用户，前面的值为用户名，后面的值为用户id，请务必保持用户名与uid对应。"
-          ></Tip>
+          <Tip :tip="descTip" text="视频简介"></Tip>
         </template>
         <n-input
+          ref="descInput"
           v-model:value="options.config.desc"
-          placeholder="请输入视频简介"
+          placeholder="请输入视频简介,支持{{title}},{{user}},{{now}}等占位符。可以输入[暮色312]<10995238>来进行艾特用户"
           clearable
           :maxlength="descMaxLength"
           show-count
@@ -128,6 +158,19 @@
             minRows: 4,
           }"
         />
+        <n-button style="margin-right: 10px" @click="previewDesc(options.config.desc || '')"
+          >预览</n-button
+        >
+        <template #feedback>
+          <span
+            v-for="item in titleList"
+            :key="item.value"
+            :title="item.label"
+            class="title-var"
+            @click="setDescVar(item.value)"
+            >{{ item.value }}</span
+          >
+        </template>
       </n-form-item>
 
       <n-form-item path="dtime" :rule="scheduledDatetimeRule">
@@ -150,6 +193,98 @@
         ></n-date-picker>
       </n-form-item>
 
+      <n-form-item label="关联预约">
+        <div v-if="reserveOptions.length" style="display: flex; flex-direction: column; gap: 8px">
+          <n-checkbox
+            v-for="item in reserveOptions"
+            :key="item.value"
+            :checked="reserveSid === item.value"
+            @update:checked="(checked: boolean) => handleReserveChange(checked, item.value)"
+          >
+            {{ item.label }}
+          </n-checkbox>
+        </div>
+        <div v-else style="display: flex; align-items: center; gap: 8px">
+          <span style="color: #999; font-size: 12px">暂无可用预约</span>
+          <n-button type="success" size="small" @click="loadReserveList">点击刷新</n-button>
+        </div>
+      </n-form-item>
+
+      <n-form-item v-if="staffEnabled && options.config.copyright !== 2">
+        <template #label>
+          <Tip
+            text="联合投稿"
+            tip="每次加载预设后清空联合投稿合作者（不保存到配置文件），必剪接口无法使用"
+          ></Tip>
+        </template>
+        <div class="staff-section">
+          <div class="staff-info">
+            <div>
+              <span>
+                {{
+                  staffRemaining >= 0
+                    ? staffRemainingTips &&
+                      typeof staffRemainingTips === "string" &&
+                      staffRemainingTips.length > 0
+                      ? staffRemainingTips
+                      : staffRemaining === 0
+                        ? "本月联合投稿使用次数已达上限（6次）"
+                        : "本月剩余联合投稿发起次数：" + staffRemaining + "次/6次"
+                    : "剩余次数获取中..."
+                }}
+              </span>
+              <span style="margin-left: 10px">最多10名合作者</span>
+            </div>
+            <n-button
+              type="success"
+              size="small"
+              :loading="staffRemainingLoading"
+              @click="loadStaffRemaining"
+              >刷新</n-button
+            >
+          </div>
+          <n-input
+            v-model:value="staffSearchKeyword"
+            placeholder="输入昵称或者UID搜索"
+            :loading="staffSearchLoading"
+            clearable
+            @input="searchStaffRemote"
+            @keyup.enter="searchStaffRemote"
+            class="staff-search-input"
+          />
+          <div v-if="staffSearchOptions.length" class="staff-search-results">
+            <div
+              v-for="user in staffSearchOptions"
+              :key="user.value"
+              class="staff-search-result"
+              @click="addStaff(user)"
+            >
+              <img :src="user.face" class="staff-avatar" referrerpolicy="no-referrer" />
+              <div class="staff-search-result-details">
+                <span class="staff-name">{{ user.label }}</span>
+                <span class="staff-uid">UID: {{ user.value }}</span>
+              </div>
+            </div>
+          </div>
+          <div v-if="options.config.staffs?.length" class="staff-list">
+            <div
+              v-for="(staff, index) in options.config.staffs"
+              :key="staff.mid"
+              class="staff-item"
+            >
+              <span class="staff-name">{{ staff.name || "UID:" + staff.mid }}</span>
+              <n-select
+                v-model:value="staff.title"
+                :options="staffTitleOptions"
+                size="small"
+                class="staff-title-select"
+              />
+              <n-button text type="error" size="small" @click="removeStaff(index)">×</n-button>
+            </div>
+          </div>
+        </div>
+      </n-form-item>
+
       <n-form-item label="粉丝动态">
         <n-input
           v-model:value="options.config.dynamic"
@@ -162,6 +297,18 @@
             minRows: 2,
           }"
         />
+      </n-form-item>
+      <n-form-item
+        v-if="options.config.copyright === 1 || options.config.copyright === 3"
+        label="添加水印"
+      >
+        <n-checkbox
+          v-model:checked="options.config.watermark"
+          :checked-value="1"
+          :unchecked-value="0"
+          title="开启"
+          >开启</n-checkbox
+        >
       </n-form-item>
 
       <n-form-item label="自制声明">
@@ -180,14 +327,6 @@
             >二创声明</n-checkbox
           >
         </div>
-      </n-form-item>
-      <n-form-item label="充电设置">
-        <n-checkbox
-          v-model:checked="options.config.openElec"
-          :checked-value="1"
-          :unchecked-value="0"
-          >启用充电面板</n-checkbox
-        >
       </n-form-item>
       <n-form-item label="高级设置">
         <div class="inline-items">
@@ -243,6 +382,14 @@
               </n-space>
             </n-radio-group>
           </div>
+          <div class="inline-item">
+            <n-checkbox
+              v-model:checked="options.config.space_hidden"
+              :checked-value="1"
+              :unchecked-value="2"
+              >在个人空间-投稿中隐藏
+            </n-checkbox>
+          </div>
         </div>
       </n-form-item>
       <n-form-item>
@@ -288,12 +435,12 @@
             ></Tip>
           </span>
         </template>
-        <div class="inline-items" style="align-items: center">
+        <div class="inline-items" style="align-items: center; flex-wrap: wrap; width: 100%">
           <n-select
             v-model:value="options.config.seasonId"
             :options="seasonList"
             placeholder="请选择合集"
-            style="width: 250px; flex: none"
+            style="flex: 1; min-width: 100px; max-width: 250px"
             clearable
           />
           <n-select
@@ -303,7 +450,7 @@
             label-field="title"
             value-field="id"
             placeholder="请选择小节"
-            style="width: 250px; flex: none"
+            style="flex: 1; min-width: 100px; max-width: 250px"
             clearable
           />
           <n-checkbox
@@ -316,16 +463,46 @@
           <n-button @click="getSeasonList(true)" type="primary">强制刷新</n-button>
         </div>
       </n-form-item>
+      <n-form-item v-if="options.config.seasonId" label="合集标题" style="margin-bottom: 10px">
+        <template #label>
+          <Tip :tip="seasonTitleTip" text="合集标题"></Tip>
+        </template>
+        <n-input
+          ref="seasonTitleInput"
+          v-model:value="options.config.seasonTitleTemplate"
+          placeholder="默认使用视频标题"
+          clearable
+          style="margin-right: 10px"
+          spellcheck="false"
+        />
+        <n-button
+          style="margin-right: 10px"
+          @click="previewSeasonTitle(options.config.seasonTitleTemplate || '')"
+          >预览</n-button
+        >
+        <template #feedback>
+          <span
+            v-for="item in seasonTitleList"
+            :key="item.value"
+            :title="item.label"
+            class="title-var"
+            @click="setSeasonTitleVar(item.value)"
+            >{{ item.value }}</span
+          >
+        </template>
+      </n-form-item>
     </n-form>
 
-    <div style="text-align: right">
-      <n-button v-if="options.id !== 'default'" ghost quaternary type="error" @click="deletePreset"
-        >删除</n-button
-      >
-      <n-button type="primary" style="margin-left: 10px" @click="rename">重命名</n-button>
-      <n-button type="primary" style="margin-left: 10px" @click="saveAnotherPreset"
-        >另存为</n-button
-      >
+    <div v-if="props.showActionButtons" style="text-align: right">
+      <template v-if="!isEditOnlyMode">
+        <n-button v-if="options.id !== 'default'" text type="error" @click="deletePreset"
+          >删除</n-button
+        >
+        <n-button type="primary" style="margin-left: 10px" @click="rename">重命名</n-button>
+        <n-button type="primary" style="margin-left: 10px" @click="saveAnotherPreset"
+          >另存为</n-button
+        >
+      </template>
       <n-button type="primary" style="margin-left: 10px" @click="savePreset">保存</n-button>
     </div>
 
@@ -352,14 +529,13 @@
 
 <script setup lang="ts">
 import { biliApi, videoPresetApi } from "@renderer/apis";
-import { previewWebhookTitle } from "@renderer/apis/common";
-import { useConfirm } from "@renderer/hooks";
-import { deepRaw, uuid } from "@renderer/utils";
+import { useConfirm, useBreakpoints } from "@renderer/hooks";
+import { uuid } from "@renderer/utils";
 
 import { uploadTitleTemplate } from "@renderer/enums";
 import { useAppConfig, useUploadPreset, useUserInfoStore } from "@renderer/stores";
 import { templateRef } from "@vueuse/core";
-import { cloneDeep } from "lodash-es";
+import { cloneDeep, isEqual } from "lodash-es";
 import DynamicTags from "./DynamicTags.vue";
 
 import type { BiliupPreset } from "@biliLive-tools/types";
@@ -367,27 +543,54 @@ import { FormItemRule } from "naive-ui";
 import { computed } from "vue";
 
 const confirm = useConfirm();
-const { getUploadPresets } = useUploadPreset();
+const uploadPresetStore = useUploadPreset();
+const { saveUploadPreset, removeUploadPreset } = uploadPresetStore;
 const { appConfig } = storeToRefs(useAppConfig());
-const { uploaPresetsOptions } = storeToRefs(useUploadPreset());
+const { uploaPresetsOptions, uploadPresetVersion } = storeToRefs(uploadPresetStore);
+const props = withDefaults(
+  defineProps<{
+    mode?: "full" | "edit-only";
+    presetId?: string;
+    showActionButtons?: boolean;
+  }>(),
+  {
+    mode: "full",
+    showActionButtons: true,
+  },
+);
 const emits = defineEmits<{
   (event: "change", value: BiliupPreset): void;
 }>();
+const { isMobile } = useBreakpoints();
+const labelWidth = computed(() => {
+  return isMobile.value ? "90px" : "120px";
+});
 
 // const presetId = ref<string>("default");
 const presetId = defineModel<string>({ required: false });
+const isEditOnlyMode = computed(() => props.mode === "edit-only");
+const activePresetId = computed(() => {
+  return isEditOnlyMode.value ? props.presetId : presetId.value;
+});
 
 // @ts-ignore
 const options: Ref<BiliupPreset> = ref({
   config: {
     uid: undefined,
     seasonId: undefined,
+    seasonTitleTemplate: "{{mediaTitle}}",
   },
 });
-const handlePresetChange = async (value: string) => {
-  const preset = await videoPresetApi.get(value);
+const handlePresetChange = async (id: string) => {
+  // 备份当前的联合投稿合作者（加载预设后保留，不被清空）
+  const currentStaffs = options.value?.config?.staffs;
+  const preset = await videoPresetApi.get(id);
   if (preset) {
     options.value = preset;
+    // 恢复联合投稿合作者（仅本次投稿有效，不因加载预设而清空）
+    if (currentStaffs && options.value?.config) {
+      options.value.config.staffs = currentStaffs;
+    }
   } else {
     // @ts-ignore
     options.value = {
@@ -400,14 +603,42 @@ const handlePresetChange = async (value: string) => {
 const noSideSpace = (value: string) => !value.startsWith(" ") && !value.endsWith(" ");
 
 watch(
-  () => presetId.value,
-  (value) => {
-    value && handlePresetChange(value);
+  () => activePresetId.value,
+  (id) => {
+    id && handlePresetChange(id);
   },
   {
     immediate: true,
   },
 );
+
+// 比较配置时忽略联合投稿合作者（staffs 仅本次投稿有效，不因保存刷新预设而清空）
+const compareConfigIgnoringStaffs = (a: Record<string, unknown>, b: Record<string, unknown>) => {
+  const copyA = { ...(a || {}) };
+  const copyB = { ...(b || {}) };
+  delete copyA.staffs;
+  delete copyB.staffs;
+  return isEqual(copyA, copyB);
+};
+
+watch(uploadPresetVersion, () => {
+  if (activePresetId.value) {
+    // 判断当前options是否与uploaPresetsOptions中的activePresetId匹配的options相同，如果不相同则更新options
+    const currentOptions = uploaPresetsOptions.value.find(
+      (preset) => preset.value === activePresetId.value,
+    )?.options;
+    if (currentOptions) {
+      // @ts-ignore
+      if (!compareConfigIgnoringStaffs(options.value.config, currentOptions)) {
+        console.log("options已过时，更新options");
+        handlePresetChange(activePresetId.value);
+      }
+    } else {
+      // 说明预设已经被删除了，重置为默认预设
+      presetId.value = "default";
+    }
+  }
+});
 
 const notice = useNotification();
 const tagCreateLoading = ref(false);
@@ -483,12 +714,168 @@ const scheduledDatetimeRule: FormItemRule = {
 };
 const scheduledTimestampMillis = computed({
   get() {
-    return options.value.config.dtime ? options.value.config.dtime * 1000 : undefined;
+    return options.value.config.dtime ? options.value.config.dtime * 1000 : null;
   },
   set(value) {
     options.value.config.dtime = value ? Math.floor(value / 1000) : undefined;
   },
 });
+const reserveOptions = ref<{ label: string; value: number }[]>([]);
+const reserveSid = computed(() => options.value.config.act_reserve?.sid);
+
+const handleReserveChange = (checked: boolean, sid: number) => {
+  if (checked) {
+    options.value.config.act_reserve = { sid };
+  } else {
+    options.value.config.act_reserve = undefined;
+  }
+};
+
+const loadReserveList = async () => {
+  try {
+    if (!userInfoStore.userInfo?.uid) {
+      reserveOptions.value = [];
+      return;
+    }
+    const data = await biliApi.getReserveList(userInfoStore.userInfo.uid);
+    const list = data?.data?.act_reserve?.act_reserve_list || [];
+    reserveOptions.value = list.map((item: any) => ({
+      label: item.title,
+      value: item.sid,
+    }));
+  } catch (e) {
+    console.error("获取预约列表失败", e);
+  }
+};
+
+// 联合投稿相关
+const staffSearchKeyword = ref("");
+const staffSearchOptions = ref<any[]>([]);
+const staffSearchLoading = ref(false);
+const staffRemaining = ref(-1);
+const staffRemainingTips = ref("");
+const staffRemainingLoading = ref(false);
+const staffEnabled = ref<boolean | null>(null);
+const loadStaffRemaining = async () => {
+  if (!userInfoStore.userInfo?.uid) {
+    staffRemaining.value = -1;
+    staffRemainingTips.value = "";
+    staffEnabled.value = null;
+    return;
+  }
+  staffRemainingLoading.value = true;
+  try {
+    const res: any = await biliApi.getStaffRemaining(userInfoStore.userInfo.uid);
+    console.log("联合投稿接口返回:", res);
+    staffEnabled.value = res.enabled;
+    if (staffEnabled.value === false) {
+      staffSearchKeyword.value = "";
+      staffSearchOptions.value = [];
+    }
+    if (res?.cnt_remaining !== undefined && res.cnt_remaining >= 0) {
+      staffRemaining.value = Number(res.cnt_remaining);
+      staffRemainingTips.value = typeof res?.tips === "string" ? res.tips : "";
+    } else {
+      staffRemaining.value = 0;
+      staffRemainingTips.value = res?.tips || "暂无联合投稿权限";
+    }
+    // 从接口返回中提取职位选项（确保label和value都是字符串）
+    if (res?.staff_titles && Array.isArray(res.staff_titles) && res.staff_titles.length > 0) {
+      const titles = res.staff_titles
+        .map((item: any) => {
+          if (typeof item === "string") {
+            return { label: item, value: item };
+          }
+          const name = String(
+            item?.name || item?.title || item?.label || item?.text || item?.value || "",
+          );
+          return { label: name, value: name };
+        })
+        .filter((item: any) => item.label && item.value);
+      staffTitleOptions.value = titles;
+      console.log("联合投稿职位选项已从接口加载:", titles);
+    }
+  } catch (e: any) {
+    console.error("获取联合投稿剩余次数失败:", e);
+    staffEnabled.value = null;
+    staffRemaining.value = 0;
+    staffRemainingTips.value = "获取失败，请稍后重试";
+  } finally {
+    staffRemainingLoading.value = false;
+    console.log(
+      "联合投稿加载完成, staffRemaining:",
+      staffRemaining.value,
+      "loading:",
+      staffRemainingLoading.value,
+    );
+  }
+};
+// 联合投稿职位选项（从接口动态获取）
+const staffTitleOptions = ref<any[]>([
+  { label: "主演", value: "主演" },
+  { label: "参演", value: "参演" },
+  { label: "嘉宾", value: "嘉宾" },
+  { label: "配音", value: "配音" },
+  { label: "动作捕捉", value: "动作捕捉" },
+  { label: "编剧", value: "编剧" },
+  { label: "导演", value: "导演" },
+  { label: "原画", value: "原画" },
+  { label: "声优", value: "声优" },
+  { label: "其他", value: "其他" },
+]);
+const searchStaffRemote = async () => {
+  if (!staffSearchKeyword.value.trim()) {
+    staffSearchOptions.value = [];
+    return;
+  }
+  if (!userInfoStore.userInfo?.uid) return;
+  staffSearchLoading.value = true;
+  try {
+    const res: any = await biliApi.searchStaffUser(
+      staffSearchKeyword.value.trim(),
+      userInfoStore.userInfo.uid,
+    );
+    if (res?.code === 0) {
+      const users = res.data?.users || res?.users || [];
+      staffSearchOptions.value = users.map((u: any) => ({
+        label: u.name,
+        value: u.mid,
+        name: u.name,
+        face: u.face,
+      }));
+    } else {
+      staffSearchOptions.value = [];
+    }
+  } catch (e: any) {
+    staffSearchOptions.value = [];
+  } finally {
+    staffSearchLoading.value = false;
+  }
+};
+const addStaff = (user: any) => {
+  const currentStaffs = options.value.config.staffs || [];
+  if (currentStaffs.length >= 10) {
+    notice.warning({ title: "联合投稿最多支持10名合作者", duration: 2000 });
+    return;
+  }
+  if (currentStaffs.some((s: any) => s.mid === user.value)) {
+    notice.warning({ title: "该用户已添加", duration: 2000 });
+    return;
+  }
+
+  options.value.config.staffs = [
+    ...currentStaffs,
+    { title: "参演", mid: user.value, name: user.label },
+  ];
+  staffSearchKeyword.value = "";
+  staffSearchOptions.value = [];
+};
+const removeStaff = (index: number) => {
+  if (!options.value.config.staffs) return;
+  const newStaffs = [...options.value.config.staffs];
+  newStaffs.splice(index, 1);
+  options.value.config.staffs = newStaffs;
+};
 
 const saveAnotherPresetConfirm = async () => {
   if (!tempPresetName.value) {
@@ -503,13 +890,12 @@ const saveAnotherPresetConfirm = async () => {
   if (!isRename.value) preset.id = uuid();
   preset.name = tempPresetName.value;
 
-  await _savePreset(preset);
+  await saveUploadPreset(preset);
   nameModelVisible.value = false;
   notice.success({
     title: "保存成功",
     duration: 1000,
   });
-  await getUploadPresets();
   presetId.value = preset.id;
   handlePresetChange(preset.id);
 };
@@ -531,34 +917,47 @@ const deletePreset = async () => {
   if (!status) return;
 
   const id = options.value.id;
-  await videoPresetApi.remove(id);
-  getUploadPresets();
+  await removeUploadPreset(id);
   presetId.value = "default";
   handlePresetChange("default");
 };
 
 const savePreset = async () => {
+  if (isEditOnlyMode.value && !options.value.id) {
+    notice.error({
+      title: "未找到可编辑的上传预设",
+      duration: 1000,
+    });
+    return false;
+  }
+
   const data = options.value;
   if (userInfoStore.userInfo?.uid) {
     data.config.uid = userInfoStore.userInfo.uid;
   }
-  await _savePreset(options.value);
+  await saveUploadPreset(options.value);
+
+  // 如果有联合投稿合作者，显示警告（和定时发布一样的提示方式）
+  if (options.value.config.staffs && options.value.config.staffs.length > 0) {
+    notice.warning({
+      title: "保存成功，但联合投稿合作者不会保存到配置文件中",
+      duration: 1000,
+    });
+    return true;
+  }
+
   if (options.value.config.dtime) {
     notice.warning({
       title: "保存成功，但定时发布不会保存到配置文件中",
       duration: 1000,
     });
-    return;
+    return true;
   }
   notice.success({
     title: "保存成功",
     duration: 1000,
   });
-};
-
-const _savePreset = async (data: BiliupPreset) => {
-  await biliApi.validUploadParams(deepRaw(data.config));
-  await videoPresetApi.save(deepRaw(data));
+  return true;
 };
 
 watch(
@@ -581,14 +980,23 @@ watchEffect(() => {
     options.value.config.closeReply = 0;
   }
 });
-// watchEffect(() => {
-//   if (options.value.config.tid) {
-//     getTypeDesc(options.value.config.tid);
-//   }
-// });
 
 // 合集
 const userInfoStore = useUserInfoStore();
+
+// 用户登录后自动加载联合投稿次数
+watch(
+  () => userInfoStore.userInfo?.uid,
+  (uid) => {
+    if (uid) {
+      loadStaffRemaining();
+    }
+  },
+  {
+    immediate: true,
+  },
+);
+
 const seasonList = ref<
   {
     label: string;
@@ -650,27 +1058,6 @@ const getSeasonList = async (force?: boolean) => {
   }
 };
 
-const areaData = ref<any[]>([]);
-const getPlatformTypes = async () => {
-  // 优先从本地缓存获取
-  const rawLocalData = window.localStorage.getItem("areaData");
-  if (rawLocalData) {
-    try {
-      areaData.value = JSON.parse(rawLocalData);
-      return;
-    } catch (e) {
-      console.error(e);
-    }
-  }
-
-  if (!userInfoStore?.userInfo?.uid) {
-    return;
-  }
-  const data = await biliApi.getPlatformPre(userInfoStore.userInfo.uid);
-  areaData.value = data.typelist;
-  window.localStorage.setItem("areaData", JSON.stringify(data.typelist));
-};
-
 const descMaxLength = ref(2000);
 
 watch(
@@ -683,7 +1070,6 @@ watch(
 watchEffect(() => {
   if (!userInfoStore.userInfo) return;
   getSeasonList();
-  getPlatformTypes();
 });
 
 const topicLoading = ref(false);
@@ -727,7 +1113,7 @@ const handleTopicChange = (topicName: string) => {
 const titleList = ref(uploadTitleTemplate);
 const titleTip = computed(() => {
   const base = `上限80字，多余的会被截断。<br/>
-  占位符用于支持webhook中的相关功能，如果你是手动上传，和你基本上没关系，如【{{user}}】{{title}}-{{now}}<br/>
+  占位符用于支持webhook中的相关功能，如【{{user}}】{{title}}-{{now}}<br/>
   不要在直播开始后修改字段，本场直播不会生效，更多模板引擎等高级用法见文档<br/>`;
   return titleList.value
     .map((item) => {
@@ -736,8 +1122,134 @@ const titleTip = computed(() => {
     .reduce((prev, cur) => prev + cur, base);
 });
 
+const seasonTitleList = computed(() => [
+  { label: "视频标题", value: "{{mediaTitle}}" },
+  ...titleList.value,
+]);
+const seasonTitleTip = computed(() => {
+  const base = `设置稿件在合集中的显示标题<br/>
+  默认{{mediaTitle}}，使用最终的视频标题，留空也使用视频标题。<br/>
+  支持与视频标题相同的占位符和模板引擎，更多高级用法见文档。<br/>`;
+  return seasonTitleList.value
+    .map((item) => `${item.label}：${item.value}<br/>`)
+    .reduce((prev, cur) => prev + cur, base);
+});
+const seasonTitleInput = templateRef("seasonTitleInput");
+const setSeasonTitleVar = async (value: string) => {
+  const input = seasonTitleInput.value?.inputElRef;
+  const currentValue = options.value.config.seasonTitleTemplate || "";
+  if (input) {
+    const start = input.selectionStart ?? currentValue.length;
+    const end = input.selectionEnd ?? currentValue.length;
+    options.value.config.seasonTitleTemplate =
+      currentValue.slice(0, start) + value + currentValue.slice(end);
+    input.focus();
+    await nextTick();
+    input.setSelectionRange(start + value.length, start + value.length);
+  } else {
+    options.value.config.seasonTitleTemplate = currentValue + value;
+  }
+};
+const previewSeasonTitle = async (template: string) => {
+  const data = await biliApi.formatWebhookSeasonTitle(template, options.value.config.title);
+  notice.info({ title: data, duration: 3000 });
+};
+
+const partTitleList = ref([
+  {
+    label: "标题",
+    value: "{{title}}",
+  },
+  {
+    value: "{{user}}",
+    label: "主播名",
+  },
+  {
+    value: "{{roomId}}",
+    label: "房间号",
+  },
+  {
+    label: "文件名",
+    value: "{{filename}}",
+  },
+  {
+    label: "序号",
+    value: "{{index}}",
+  },
+  {
+    label: "弹幕版or纯享版",
+    value: "{{hasDanmaStr}}",
+  },
+  {
+    value: "{{yyyy}}",
+    label: "年",
+  },
+  {
+    value: "{{MM}}",
+    label: "月（补零）",
+  },
+  {
+    value: "{{dd}}",
+    label: "日（补零）",
+  },
+  {
+    value: "{{HH}}",
+    label: "时（补零）",
+  },
+  {
+    value: "{{mm}}",
+    label: "分（补零）",
+  },
+  {
+    value: "{{ss}}",
+    label: "秒（补零）",
+  },
+]);
+const partTitleTip = computed(() => {
+  const base = `留空则使用当前分P标题。<br/>更多模板引擎等高级用法见文档<br/>`;
+  return partTitleList.value
+    .map((item) => {
+      return `${item.label}：${item.value}<br/>`;
+    })
+    .reduce((prev, cur) => prev + cur, base);
+});
+
+const partTitleInput = templateRef("partTitleInput");
+const setPartTitleVar = async (value: string) => {
+  if (!options.value.config.partTitleTemplate) {
+    options.value.config.partTitleTemplate = "";
+  }
+  const input = partTitleInput.value?.inputElRef;
+  if (input) {
+    const currentValue = options.value.config.partTitleTemplate || "";
+    const start = input.selectionStart ?? currentValue.length;
+    const end = input.selectionEnd ?? currentValue.length;
+    options.value.config.partTitleTemplate =
+      currentValue.slice(0, start) + value + currentValue.slice(end);
+    input.focus();
+    await nextTick();
+    input.setSelectionRange(start + value.length, start + value.length);
+  } else {
+    options.value.config.partTitleTemplate = (options.value.config.partTitleTemplate || "") + value;
+  }
+};
+const previewPartTitle = async (template: string) => {
+  if (!template) {
+    notice.warning({
+      title: "请输入分P标题模板",
+      duration: 2000,
+    });
+    return;
+  }
+  const data = await biliApi.formatWebhookPartTitle(template);
+  notice.info({
+    title: data,
+    duration: 3000,
+  });
+};
+
 const previewTitle = async (template: string) => {
-  const data = await previewWebhookTitle(template);
+  const data = await biliApi.formatWebhookTitle(template);
   notice.warning({
     title: data,
     duration: 3000,
@@ -762,6 +1274,51 @@ const setTitleVar = async (value: string) => {
   }
 };
 
+const descInput = templateRef("descInput");
+const setDescVar = async (value: string) => {
+  if (!options.value.config.desc) {
+    options.value.config.desc = "";
+  }
+  const input = descInput.value?.textareaElRef;
+  if (input) {
+    const currentValue = options.value.config.desc || "";
+    const start = input.selectionStart ?? currentValue.length;
+    const end = input.selectionEnd ?? currentValue.length;
+    options.value.config.desc = currentValue.slice(0, start) + value + currentValue.slice(end);
+    input.focus();
+    await nextTick();
+    input.setSelectionRange(start + value.length, start + value.length);
+  } else {
+    options.value.config.desc = (options.value.config.desc || "") + value;
+  }
+};
+
+const previewDesc = async (template: string) => {
+  if (!template) {
+    notice.warning({
+      title: "请输入简介内容",
+      duration: 2000,
+    });
+    return;
+  }
+  const data = await biliApi.formatWebhookDesc(template);
+  notice.info({
+    title: data,
+    duration: 3000,
+  });
+};
+
+const descTip = computed(() => {
+  const base = `上限2000字，多余的会被截断。<br/>
+  可以输入[暮色312]&lt;10995238&gt;来进行艾特用户，前面的值为用户名，后面的值为用户id，请务必保持用户名与uid对应。<br/>
+  更多模板引擎等高级用法见文档<br/>`;
+  return titleList.value
+    .map((item) => {
+      return `${item.label}：${item.value}<br/>`;
+    })
+    .reduce((prev, cur) => prev + cur, base);
+});
+
 const setTitle = (name: string) => {
   options.value.config.title = name;
 };
@@ -772,6 +1329,7 @@ const getTitle = () => {
 defineExpose({
   setTitle,
   getTitle,
+  savePreset,
 });
 
 const humanTypeList = ref([
@@ -896,9 +1454,127 @@ const humanTypeList = ref([
     name: "生活经验",
   },
 ]);
+
+const creationStatementList = ref([
+  {
+    id: -1,
+    name: "内容无需标注",
+  },
+  {
+    id: 1,
+    name: "含AI生成内容",
+  },
+  {
+    id: 2,
+    name: "含虚构演绎内容",
+  },
+  {
+    id: 3,
+    name: "内容含营销信息",
+  },
+  {
+    id: 4,
+    name: "个人观点，仅供参考",
+  },
+]);
 </script>
 
 <style scoped lang="less">
+.staff-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+}
+
+.staff-info {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 12px;
+  color: #999;
+  line-height: 1.8;
+}
+
+.staff-search-input {
+  width: 100%;
+}
+
+.staff-search-results {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid #f0f0f0;
+  border-radius: 4px;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.staff-search-result {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  cursor: pointer;
+  border-bottom: 1px solid #f0f0f0;
+
+  &:hover {
+    background: #f5f5f5;
+  }
+}
+[data-theme="dark"] {
+  .staff-search-results {
+    border: 1px solid #2c2c2c;
+  }
+  .staff-search-result {
+    border-bottom: 1px solid #2c2c2c;
+    &:hover {
+      background: #2c2c2c;
+    }
+  }
+  .staff-item {
+    background: #2c2c2c;
+  }
+}
+
+.staff-avatar {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+}
+
+.staff-search-result-details {
+  display: flex;
+  flex-direction: column;
+}
+
+.staff-name {
+  font-size: 13px;
+}
+
+.staff-uid {
+  font-size: 11px;
+  color: #999;
+}
+
+.staff-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.staff-item {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  background: #f5f5f5;
+  border-radius: 4px;
+  padding: 4px 8px;
+}
+
+.staff-title-select {
+  width: 100px;
+}
+
 .footer {
   text-align: right;
   .btn + .btn {
@@ -909,10 +1585,12 @@ const humanTypeList = ref([
 .inline-items {
   display: flex;
   gap: 10px;
+  flex-wrap: wrap;
 
   .inline-item {
     display: inline-flex;
     align-items: center;
+    flex: none;
   }
 }
 .title-var {

@@ -6,11 +6,10 @@ import {
   genRecorderUUID,
   genRecordUUID,
   utils,
-  createBaseRecorder,
+  createDownloader,
 } from "@bililive-tools/manager";
 
 import { getInfo, getStream } from "./stream.js";
-import { ensureFolderExist } from "./utils.js";
 import HuYaDanMu, { HuYaMessage } from "huya-danma-listener";
 
 import type {
@@ -20,6 +19,7 @@ import type {
   RecorderCreateOpts,
   RecorderProvider,
   RecordHandle,
+  VideoFileCreatedPayload,
 } from "@bililive-tools/manager";
 
 function createRecorder(opts: RecorderCreateOpts): Recorder {
@@ -31,10 +31,11 @@ function createRecorder(opts: RecorderCreateOpts): Recorder {
     // @ts-ignore
     ...mitt(),
     ...opts,
+    cache: null as any,
+    appendTimeline: null as any,
 
     availableStreams: [],
     availableSources: [],
-    qualityMaxRetry: opts.qualityRetry ?? 0,
     qualityRetry: opts.qualityRetry ?? 0,
     state: "idle",
     api: opts.api ?? "auto",
@@ -63,6 +64,9 @@ function createRecorder(opts: RecorderCreateOpts): Recorder {
         quality: this.quality,
         streamPriorities: this.streamPriorities,
         sourcePriorities: this.sourcePriorities,
+        api: this.api as "auto" | "web" | "mp" | "wup", //"wup"
+        strictQuality: false,
+        formatPriorities: this.formatPriorities,
       });
       return res.currentStream;
     },
@@ -83,41 +87,38 @@ function createRecorder(opts: RecorderCreateOpts): Recorder {
   return recorderWithSupportUpdatedEvent;
 }
 
-const ffmpegOutputOptions: string[] = [
-  "-c",
-  "copy",
-  "-movflags",
-  "faststart+frag_keyframe+empty_moov",
-  "-min_frag_duration",
-  "10000000",
-];
-const ffmpegInputOptions: string[] = [
-  "-reconnect",
-  "1",
-  "-reconnect_streamed",
-  "1",
-  "-reconnect_delay_max",
-  "10",
-  "-rw_timeout",
-  "15000000",
-];
+const ffmpegOutputOptions: string[] = [];
+const ffmpegInputOptions: string[] = ["-rw_timeout", "10000000", "-timeout", "10000000"];
 
 const checkLiveStatusAndRecord: Recorder["checkLiveStatusAndRecord"] = async function ({
   getSavePath,
   banLiveId,
   isManualStart,
 }) {
-  if (this.recordHandle != null) return this.recordHandle;
+  // 如果已经在录制中，只在需要检查标题关键词时才获取最新信息
+  if (this.recordHandle != null) {
+    const shouldStop = await utils.checkTitleKeywordsWhileRecording(this, isManualStart, getInfo);
+    if (shouldStop) {
+      return null;
+    }
 
+    // 已经在录制中，直接返回
+    return this.recordHandle;
+  }
+
+  // 获取直播间信息
   try {
     const liveInfo = await getInfo(this.channelId);
     this.liveInfo = liveInfo;
-    this.state = "idle";
+    this.emit("stateChange", { state: "idle" });
   } catch (error) {
-    this.state = "check-error";
+    this.emit("stateChange", {
+      state: "check-error",
+      msg: `检查失败，` + (error instanceof Error ? error.message : String(error)),
+    });
     throw error;
   }
-  const { living, owner, title } = this.liveInfo;
+  const { living, owner, title, liveStartTime, recordStartTime } = this.liveInfo;
 
   if (this.liveInfo.liveId === banLiveId) {
     this.tempStopIntervalCheck = true;
@@ -127,36 +128,39 @@ const checkLiveStatusAndRecord: Recorder["checkLiveStatusAndRecord"] = async fun
   if (this.tempStopIntervalCheck) return null;
   if (!living) return null;
 
+  // 检查标题是否包含关键词
+  if (utils.checkTitleKeywordsBeforeRecord(title, this, isManualStart)) return null;
+
+  const qualityRetryLeft = (await this.cache.get("qualityRetryLeft")) ?? this.qualityRetry;
+  const strictQuality = utils.shouldUseStrictQuality(
+    qualityRetryLeft,
+    this.qualityRetry,
+    isManualStart,
+  );
+
   let res: Awaited<ReturnType<typeof getStream>>;
-  // TODO: 先不做什么错误处理，就简单包一下预期上会有错误的地方
+
   try {
-    let strictQuality = false;
-    if (this.qualityRetry > 0) {
-      strictQuality = true;
-    }
-    if (this.qualityMaxRetry < 0) {
-      strictQuality = true;
-    }
-    if (isManualStart) {
-      strictQuality = false;
-    }
     res = await getStream({
       channelId: this.channelId,
       quality: this.quality,
       streamPriorities: this.streamPriorities,
       sourcePriorities: this.sourcePriorities,
-      api: this.api as "auto" | "web" | "mp",
+      api: this.api as "auto" | "web" | "mp" | "wup", //"wup"
       strictQuality,
       formatPriorities: this.formatPriorities,
     });
   } catch (err) {
-    if (this.qualityRetry > 0) this.qualityRetry -= 1;
+    if (qualityRetryLeft > 0) await this.cache.set("qualityRetryLeft", qualityRetryLeft - 1);
 
-    this.state = "check-error";
+    this.emit("stateChange", {
+      state: "check-error",
+      msg: `检查失败，` + (err instanceof Error ? err.message : String(err)),
+    });
     throw err;
   }
 
-  this.state = "recording";
+  this.emit("stateChange", { state: "recording" });
   const { currentStream: stream, sources: availableSources, streams: availableStreams } = res;
   this.availableStreams = availableStreams.map((s) => s.desc);
   this.availableSources = availableSources.map((s) => s.name);
@@ -164,12 +168,7 @@ const checkLiveStatusAndRecord: Recorder["checkLiveStatusAndRecord"] = async fun
   this.usedSource = stream.source;
 
   let isEnded = false;
-  let isCutting = false;
   const onEnd = (...args: unknown[]) => {
-    if (isCutting) {
-      isCutting = false;
-      return;
-    }
     if (isEnded) return;
     isEnded = true;
     this.emit("DebugLog", {
@@ -179,20 +178,35 @@ const checkLiveStatusAndRecord: Recorder["checkLiveStatusAndRecord"] = async fun
     const reason = args[0] instanceof Error ? args[0].message : String(args[0]);
     this.recordHandle?.stop(reason);
   };
+  // let ua =
+  //   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/73.0.3683.86 Safari/537.36";
+  // if (res.api === "wup") {
+  //   ua = "HYSDK(Windows,30000002)_APP(pc_exe&7030003&official)_SDK(trans&2.29.0.5493)";
+  // }
 
-  let recorderType: Parameters<typeof createBaseRecorder>[0] =
-    this.recorderType === "mesio" ? "mesio" : "ffmpeg";
-  const recorder = createBaseRecorder(
-    recorderType,
+  const downloader = createDownloader(
+    this.recorderType,
     {
       url: stream.url,
       outputOptions: ffmpegOutputOptions,
       inputOptions: ffmpegInputOptions,
       segment: this.segment ?? 0,
       getSavePath: (opts) =>
-        getSavePath({ owner, title: opts.title ?? title, startTime: opts.startTime }),
+        getSavePath({
+          owner,
+          title: opts.title ?? title,
+          startTime: opts.startTime,
+          liveStartTime,
+          recordStartTime,
+          extraMs: opts.extraMs,
+        }),
       disableDanma: this.disableProvideCommentsWhenRecording,
       videoFormat: this.videoFormat ?? "auto",
+      debugLevel: this.debugLevel ?? "none",
+      headers: {
+        "User-Agent": stream.ua,
+      },
+      proxy: this.proxy,
     },
     onEnd,
     async () => {
@@ -201,20 +215,13 @@ const checkLiveStatusAndRecord: Recorder["checkLiveStatusAndRecord"] = async fun
     },
   );
 
-  const savePath = getSavePath({
-    owner,
+  const handleVideoCreated = async ({
+    filename,
     title,
-  });
-
-  try {
-    ensureFolderExist(savePath);
-  } catch (err) {
-    this.state = "idle";
-    throw err;
-  }
-
-  const handleVideoCreated = async ({ filename, title, cover }) => {
-    this.emit("videoFileCreated", { filename, cover });
+    cover,
+    rawFilename,
+  }: VideoFileCreatedPayload) => {
+    this.emit("videoFileCreated", { filename, cover, rawFilename });
 
     if (title && this?.liveInfo) {
       this.liveInfo.title = title;
@@ -222,24 +229,24 @@ const checkLiveStatusAndRecord: Recorder["checkLiveStatusAndRecord"] = async fun
     if (cover && this?.liveInfo) {
       this.liveInfo.cover = cover;
     }
-    const extraDataController = recorder.getExtraDataController();
+    const extraDataController = downloader.getExtraDataController();
     extraDataController?.setMeta({
       room_id: this.channelId,
       platform: provider?.id,
-      liveStartTimestamp: this?.liveInfo?.startTime?.getTime(),
+      liveStartTimestamp: this?.liveInfo?.liveStartTime?.getTime(),
       // recordStopTimestamp: Date.now(),
       title: title,
       user_name: owner,
     });
   };
-  recorder.on("videoFileCreated", handleVideoCreated);
-  recorder.on("videoFileCompleted", ({ filename }) => {
-    this.emit("videoFileCompleted", { filename });
+  downloader.on("videoFileCreated", handleVideoCreated);
+  downloader.on("videoFileCompleted", (data) => {
+    this.emit("videoFileCompleted", data);
   });
-  recorder.on("DebugLog", (data) => {
+  downloader.on("DebugLog", (data) => {
     this.emit("DebugLog", data);
   });
-  recorder.on("progress", (progress) => {
+  downloader.on("progress", (progress) => {
     if (this.recordHandle) {
       this.recordHandle.progress = progress;
     }
@@ -248,9 +255,14 @@ const checkLiveStatusAndRecord: Recorder["checkLiveStatusAndRecord"] = async fun
 
   let client: HuYaDanMu | null = null;
   if (!this.disableProvideCommentsWhenRecording) {
-    client = new HuYaDanMu(this.channelId);
+    client = new HuYaDanMu({
+      roomid: this.channelId,
+      uid: res.currentStream.uid,
+      subChannelId: res.currentStream.subChannelId,
+      channelId: res.currentStream.channelId,
+    });
     client.on("message", (msg: HuYaMessage) => {
-      const extraDataController = recorder.getExtraDataController();
+      const extraDataController = downloader.getExtraDataController();
       if (!extraDataController) return;
 
       switch (msg.type) {
@@ -294,57 +306,58 @@ const checkLiveStatusAndRecord: Recorder["checkLiveStatusAndRecord"] = async fun
     client.on("error", (e: unknown) => {
       this.emit("DebugLog", { type: "common", text: String(e) });
     });
+    client.on("connect", () => {
+      this.appendTimeline({ text: `弹幕连接已建立` });
+    });
     client.on("retry", (e: { count: number; max: number }) => {
+      this.appendTimeline({ text: `弹幕连接断开，正在重试: ${e.count}/${e.max}` });
       this.emit("DebugLog", {
         type: "common",
-        text: `huya danmu retry: ${e.count}/${e.max}`,
+        text: `${this?.liveInfo?.owner}:${this.channelId} huya danmu retry: ${e.count}/${e.max}`,
       });
     });
     client.start();
   }
 
-  const ffmpegArgs = recorder.getArguments();
-  recorder.run();
+  const downloaderArgs = downloader.getArguments();
+  downloader.run();
 
   const cut = utils.singleton<RecordHandle["cut"]>(async () => {
     if (!this.recordHandle) return;
-    if (isCutting) return;
-    isCutting = true;
-    await recorder.stop();
-    recorder.createCommand();
-    recorder.run();
+    downloader.cut();
   });
 
   const stop = utils.singleton<RecordHandle["stop"]>(async (reason?: string) => {
     if (!this.recordHandle) return;
 
-    this.state = "stopping-record";
+    this.emit("stateChange", { state: "stopping-record" });
 
     try {
       client?.stop();
-      await recorder.stop();
+      await downloader.stop();
     } catch (err) {
       this.emit("DebugLog", {
         type: "error",
-        text: `stop ffmpeg error: ${String(err)}`,
+        text: `stop record error: ${String(err)}`,
       });
     }
     this.usedStream = undefined;
     this.usedSource = undefined;
-
     this.emit("RecordStop", { recordHandle: this.recordHandle, reason });
     this.recordHandle = undefined;
     this.liveInfo = undefined;
-    this.state = "idle";
+    this.emit("stateChange", { state: "idle" });
+    this.cache.set("qualityRetryLeft", this.qualityRetry);
   });
 
   this.recordHandle = {
     id: genRecordUUID(),
     stream: stream.name,
     source: stream.source,
+    recorderType: downloader.type,
     url: stream.url,
-    ffmpegArgs,
-    savePath: savePath,
+    downloaderArgs,
+    savePath: downloader.videoFilePath,
     stop,
     cut,
   };

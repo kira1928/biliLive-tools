@@ -1,5 +1,13 @@
-import request from "./request";
 import type { AppConfig } from "@biliLive-tools/types";
+
+import request from "./request";
+
+export interface VerifyBiliKeyResponse {
+  configured: boolean;
+  valid: boolean;
+  matched: boolean;
+  reason: "missing" | "mismatch" | "error" | "ok";
+}
 
 export const get = async (): Promise<AppConfig> => {
   if (window.isWeb) {
@@ -26,7 +34,6 @@ export const set = async <K extends keyof AppConfig>(
 };
 
 export const save = async <K extends keyof AppConfig>(data: AppConfig[K]): Promise<void> => {
-  console.log("save", data);
   if (window.isWeb) {
     const res = await request.post(`/config`, data);
     return res.data;
@@ -36,7 +43,7 @@ export const save = async <K extends keyof AppConfig>(data: AppConfig[K]): Promi
 };
 
 export const resetBin = async (type: "ffmpeg" | "ffprobe" | "danmakuFactory"): Promise<string> => {
-  const res = await request.post(`/config/resetBin`, { type });
+  const res = await request.post(`/config/reset-bin`, { type });
   return res.data;
 };
 
@@ -68,6 +75,11 @@ export const importConfig = async (file: File): Promise<void> => {
   return res.data;
 };
 
+export const verifyBiliKey = async (key: string): Promise<VerifyBiliKeyResponse> => {
+  const res = await request.post(`/config/verifyBiliKey`, { key });
+  return res.data;
+};
+
 const config = {
   get,
   set,
@@ -76,6 +88,7 @@ const config = {
   notifyTest,
   exportConfig,
   importConfig,
+  verifyBiliKey,
 };
 
 export default config;

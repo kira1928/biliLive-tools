@@ -1,37 +1,82 @@
 import fs from "fs-extra";
 import path from "node:path";
 import axios from "axios";
-import { omit } from "lodash-es";
+import { cloneDeep, omit } from "lodash-es";
 
 import { provider as providerForDouYu } from "@bililive-tools/douyu-recorder";
 import { provider as providerForHuYa } from "@bililive-tools/huya-recorder";
 import { provider as providerForBiliBili } from "@bililive-tools/bilibili-recorder";
 import { provider as providerForDouYin } from "@bililive-tools/douyin-recorder";
+import { provider as providerForXHS } from "@bililive-tools/xhs-recorder";
+import { provider as providerForTikTok } from "@bililive-tools/tiktok-recorder";
 
 import {
   createRecorderManager as createManager,
   setFFMPEGPath,
   setMesioPath,
+  setBililivePath,
   utils,
 } from "@bililive-tools/manager";
 
 import recordHistory from "./recordHistory.js";
-import { danmuModel } from "../db/index.js";
+import { danmuService } from "../db/index.js";
 // import DanmuService from "../db/service/danmuService.js";
-import { getFfmpegPath, readVideoMeta } from "../task/video.js";
+import { getBinPath, readVideoMeta, transcode } from "../task/video.js";
 import logger from "../utils/log.js";
-import { replaceExtName } from "../utils/index.js";
+import {
+  replaceExtName,
+  calculateFileQuickHash,
+  sendExternalEventRequest,
+} from "../utils/index.js";
 import RecorderConfig from "./config.js";
 import { sendBySystem, send } from "../notify.js";
 import { danmaReport, parseDanmu } from "../danmu/index.js";
 
 import type { AppConfig } from "../config.js";
-import type { Recorder as RecorderConfigType } from "@biliLive-tools/types";
-import type { Recorder } from "@bililive-tools/manager";
+import type {
+  Recorder as RecorderConfigType,
+  AppConfig as AppConfigType,
+} from "@biliLive-tools/types";
+import type { Recorder, ResolveChannelOptions } from "@bililive-tools/manager";
 
 export { RecorderConfig };
 
-async function sendLiveNotification(
+// 缓存直播结束通知的最后触发时间，避免频繁通知
+const endLiveNotificationCache = new Map<string, number>();
+
+type RecorderExternalSource = {
+  channelId: string;
+  providerId: string;
+  liveInfo?: {
+    title?: string;
+    owner?: string;
+    liveId?: string;
+    avatar?: string;
+    cover?: string;
+  };
+  extra?: {
+    avatar?: string;
+  };
+};
+
+const getRecorderExternalBase = (recorder: RecorderExternalSource) => {
+  return {
+    roomId: String(recorder.channelId),
+    platform: recorder.providerId,
+    title: recorder.liveInfo?.title,
+    username: recorder.liveInfo?.owner,
+    time: new Date().toISOString(),
+    liveId: recorder.liveInfo?.liveId || "",
+    avatar: recorder.liveInfo?.avatar || recorder.extra?.avatar || "",
+    cover: recorder.liveInfo?.cover || "",
+  };
+};
+
+const sendRecorderExternalEvent = async (type: string, data: Record<string, unknown>) => {
+  await sendExternalEventRequest(type, data);
+};
+
+async function sendStartLiveNotification(
   appConfig: AppConfig,
   recorder: Recorder,
   config: RecorderConfigType,
@@ -47,14 +92,140 @@ async function sendLiveNotification(
 
   if (notifyType === "system") {
     const event = await sendBySystem(title, `${recorder?.liveInfo?.title}\n点击打开直播间`);
+    // @ts-ignore
     const { shell } = await import("electron");
     event?.on("click", () => {
       const url = recorder.getChannelURL();
       shell.openExternal(url);
     });
   } else {
-    await send(title, `标题：${recorder?.liveInfo?.title}`, { type: "liveStart" });
+    await send(title, `标题：${recorder?.liveInfo?.title}`, {
+      type: "liveStart",
+      context: {
+        event: "live_start",
+        eventLabel: "开播",
+        roomId: String(recorder.channelId),
+        platform: recorder.providerId,
+        username: name,
+        liveTitle: recorder?.liveInfo?.title,
+        liveId: recorder?.liveInfo?.liveId,
+        roomUrl: recorder.getChannelURL(),
+        startedAt: new Date().toISOString(),
+      },
+    });
   }
+}
+
+async function sendChargeLiveNotification(
+  appConfig: AppConfig,
+  recorder: Recorder,
+  config: RecorderConfigType,
+) {
+  const name = recorder?.liveInfo?.owner ? recorder.liveInfo.owner : config.remarks;
+  // 通知会触发于付费/大航海权限/密码房等所有不可录类型，用 liveInfo 的类型提示精确措辞，
+  // 取不到时回退为通用「特殊直播」，不写死「付费直播(DRM)」以免对 guard/密码房误导。
+  const typeDesc = recorder?.liveInfo?.liveTypeDesc ?? "特殊直播";
+  const title = `${name}(${config.channelId}) 正在进行${typeDesc}`;
+
+  const globalConfig = appConfig.getAll();
+  let notifyType = globalConfig?.notification?.setting?.type;
+  if (globalConfig?.notification?.taskNotificationType["chargeLive"]) {
+    notifyType = globalConfig?.notification?.taskNotificationType["chargeLive"];
+  }
+
+  const desp = `标题：${recorder?.liveInfo?.title}\n该直播为${typeDesc}，无法自动录制`;
+  if (notifyType === "system") {
+    const event = await sendBySystem(title, `${desp}\n点击打开直播间`);
+    // @ts-ignore
+    const { shell } = await import("electron");
+    event?.on("click", () => {
+      const url = recorder.getChannelURL();
+      shell.openExternal(url);
+    });
+  } else {
+    await send(title, desp, { type: "chargeLive" });
+  }
+}
+
+async function sendEndLiveNotification(
+  appConfig: AppConfig,
+  recorder: Recorder,
+  config: RecorderConfigType,
+) {
+  const cacheKey = `${recorder.providerId}_${recorder.id}`;
+  const now = Date.now();
+  const lastNotificationTime = endLiveNotificationCache.get(cacheKey);
+
+  // 如果距离上次通知不到10分钟，跳过
+  if (lastNotificationTime && now - lastNotificationTime < 10 * 60 * 1000) {
+    logger.info(
+      `跳过直播结束通知，距离上次通知不到10分钟：${config.remarks} (${config.channelId})`,
+    );
+    return;
+  }
+
+  const name = recorder?.liveInfo?.owner ? recorder.liveInfo.owner : config.remarks;
+  const title = `${name}(${config.channelId}) 录制已停止`;
+
+  const globalConfig = appConfig.getAll();
+  let notifyType = globalConfig?.notification?.setting?.type;
+  if (globalConfig?.notification?.taskNotificationType["liveStart"]) {
+    notifyType = globalConfig?.notification?.taskNotificationType["liveStart"];
+  }
+
+  if (notifyType === "system") {
+    sendBySystem(title, "");
+  } else {
+    await send(title, `标题：${recorder?.liveInfo?.title}`, {
+      type: "liveStart",
+      context: {
+        event: "live_end",
+        eventLabel: "下播",
+        roomId: String(recorder.channelId),
+        platform: recorder.providerId,
+        username: name,
+        liveTitle: recorder?.liveInfo?.title,
+        liveId: recorder?.liveInfo?.liveId,
+        roomUrl: recorder.getChannelURL(),
+        endedAt: new Date().toISOString(),
+      },
+    });
+  }
+
+  // 更新最后通知时间
+  endLiveNotificationCache.set(cacheKey, now);
+}
+
+async function convert2Mp4(videoFile: string): Promise<string> {
+  const output = replaceExtName(videoFile, ".mp4");
+  if (await fs.pathExists(output)) {
+    throw new Error(`目标文件已存在: ${output}`);
+  }
+
+  const name = path.basename(output);
+  return new Promise((resolve, reject) => {
+    transcode(
+      videoFile,
+      name,
+      {
+        encoder: "copy",
+        audioCodec: "copy",
+      },
+      {
+        saveType: 1,
+        savePath: ".",
+        override: false,
+        removeOrigin: false,
+      },
+    ).then((task) => {
+      task.on("task-end", () => {
+        resolve(output);
+      });
+      task.on("task-error", () => {
+        reject();
+      });
+    });
+  });
 }
 
 export async function createRecorderManager(appConfig: AppConfig) {
@@ -67,8 +238,82 @@ export async function createRecorderManager(appConfig: AppConfig) {
     recorder: Recorder,
     args: Omit<RecorderConfigType, "channelId" | "providerId">,
   ) {
-    Object.assign(recorder, { ...omit(args, ["id"]) });
+    const cloneArgs = cloneDeep(args);
+    // 不更新extra字段，可能包含运行时数据
+    // @ts-ignore
+    delete cloneArgs.extra;
+    Object.assign(recorder, { ...omit(cloneArgs, ["id"]) });
     return recorder;
+  }
+
+  /**
+   * 构建manager配置项
+   */
+  async function buildManagerOptions(config: AppConfigType) {
+    const savePathRule = path.join(config?.recorder?.savePath, config?.recorder?.nameRule);
+    const autoCheckInterval = config?.recorder?.checkInterval ?? 60;
+    const maxThreadCount = config?.recorder?.maxThreadCount ?? 3;
+    const waitTime = config?.recorder?.waitTime ?? 0;
+
+    // 构建每个平台的检查配置
+    const providerCheckConfig: Record<
+      string,
+      {
+        autoCheckInterval?: number;
+        maxThreadCount?: number;
+        waitTime?: number;
+      }
+    > = {
+      [providerForBiliBili.id]: {
+        autoCheckInterval: (config?.recorder?.bilibili.checkInterval ?? autoCheckInterval) * 1000,
+        maxThreadCount: config?.recorder?.bilibili.maxThreadCount ?? maxThreadCount,
+        waitTime: config?.recorder?.bilibili.waitTime ?? waitTime,
+      },
+      [providerForDouYu.id]: {
+        autoCheckInterval: (config?.recorder?.douyu.checkInterval ?? autoCheckInterval) * 1000,
+        maxThreadCount: config?.recorder?.douyu.maxThreadCount ?? maxThreadCount,
+        waitTime: config?.recorder?.douyu.waitTime ?? waitTime,
+      },
+      [providerForHuYa.id]: {
+        autoCheckInterval: (config?.recorder?.huya.checkInterval ?? autoCheckInterval) * 1000,
+        maxThreadCount: config?.recorder?.huya.maxThreadCount ?? maxThreadCount,
+        waitTime: config?.recorder?.huya.waitTime ?? waitTime,
+      },
+      [providerForDouYin.id]: {
+        autoCheckInterval: (config?.recorder?.douyin.checkInterval ?? autoCheckInterval) * 1000,
+        maxThreadCount: config?.recorder?.douyin.maxThreadCount ?? maxThreadCount,
+        waitTime: config?.recorder?.douyin.waitTime ?? waitTime,
+      },
+      [providerForXHS.id]: {
+        autoCheckInterval: (config?.recorder?.xhs.checkInterval ?? autoCheckInterval) * 1000,
+        maxThreadCount: config?.recorder?.xhs.maxThreadCount ?? maxThreadCount,
+        waitTime: config?.recorder?.xhs.waitTime ?? waitTime,
+      },
+      [providerForTikTok.id]: {
+        autoCheckInterval: (config?.recorder?.tiktok?.checkInterval ?? autoCheckInterval) * 1000,
+        maxThreadCount: config?.recorder?.tiktok?.maxThreadCount ?? maxThreadCount,
+        waitTime: config?.recorder?.tiktok?.waitTime ?? waitTime,
+      },
+    };
+
+    return {
+      providers: [
+        providerForDouYu,
+        providerForHuYa,
+        providerForBiliBili,
+        providerForDouYin,
+        providerForXHS,
+        providerForTikTok,
+      ],
+      autoRemoveSystemReservedChars: true,
+      autoCheckInterval: autoCheckInterval * 1000,
+      savePathRule: savePathRule,
+      biliBatchQuery: config?.recorder?.bilibili.useBatchQuery ?? false,
+      recordRetryImmediately: config?.recorder?.recordRetryImmediately ?? false,
+      maxThreadCount: maxThreadCount,
+      waitTime: waitTime,
+      providerCheckConfig,
+    };
   }
 
   /**
@@ -81,12 +326,21 @@ export async function createRecorderManager(appConfig: AppConfig) {
     const config = appConfig.getAll();
     const savePathRule = path.join(config?.recorder?.savePath, config?.recorder?.nameRule);
     const autoCheckInterval = config?.recorder?.checkInterval ?? 60;
+    const maxThreadCount = config?.recorder?.maxThreadCount ?? 3;
+    const waitTime = config?.recorder?.waitTime ?? 0;
     const autoCheckLiveStatusAndRecord = config?.recorder?.autoRecord ?? false;
 
     manager.autoCheckInterval = autoCheckInterval * 1000;
+    manager.maxThreadCount = maxThreadCount;
+    manager.waitTime = waitTime;
     manager.savePathRule = savePathRule;
     manager.biliBatchQuery = config?.recorder?.bilibili.useBatchQuery ?? false;
     manager.recordRetryImmediately = config?.recorder?.recordRetryImmediately ?? false;
+
+    const managerOptions = await buildManagerOptions(config);
+
+    // 更新每个平台的检查配置
+    manager.providerCheckConfig = managerOptions.providerCheckConfig;
 
     if (autoCheckLiveStatusAndRecord) {
       if (autoCheckLiveStatusAndRecord && !manager.isCheckLoopRunning) {
@@ -112,28 +366,21 @@ export async function createRecorderManager(appConfig: AppConfig) {
   }
 
   const config = appConfig.getAll();
-  const { ffmpegPath, mesioPath } = getFfmpegPath();
+  const { ffmpegPath, mesioPath, bililiveRecorderPath } = getBinPath();
   setFFMPEGPath(ffmpegPath);
   setMesioPath(mesioPath);
+  setBililivePath(bililiveRecorderPath);
 
-  const savePathRule = path.join(config?.recorder?.savePath, config?.recorder?.nameRule);
-  const autoCheckInterval = config?.recorder?.checkInterval ?? 60;
   const autoCheckLiveStatusAndRecord = config?.recorder?.autoRecord ?? false;
 
-  const manager = createManager({
-    providers: [providerForDouYu, providerForHuYa, providerForBiliBili, providerForDouYin],
-    autoRemoveSystemReservedChars: true,
-    autoCheckInterval: autoCheckInterval * 1000,
-    savePathRule: savePathRule,
-    biliBatchQuery: config?.recorder?.bilibili.useBatchQuery ?? false,
-    recordRetryImmediately: config?.recorder?.recordRetryImmediately ?? false,
-  });
+  const managerOptions = await buildManagerOptions(config);
+  const manager = createManager(managerOptions);
 
   manager.on("RecorderDebugLog", ({ recorder, ...log }) => {
     if (log.type !== "ffmpeg") {
       logger.info(`recorder: ${log.text}`);
     }
-    const debugMode = appConfig?.data?.recorder?.debugMode;
+    const debugMode = recorder.debugLevel !== "none";
     if (!debugMode) return;
 
     if (recorder.recordHandle) {
@@ -141,38 +388,75 @@ export async function createRecorderManager(appConfig: AppConfig) {
         `${recorder.recordHandle.savePath}_${recorder.id}`,
         ".recorder.log",
       );
-      fs.appendFileSync(logFilePath, log.text + "\n");
+      fs.appendFile(logFilePath, log.text + "\n").catch(() => {});
       return;
     } else {
       logger.info(`recorder: ${log.text}`);
     }
   });
-  manager.on("RecordStart", (debug) => {
-    logger.info("Manager start", debug);
+  manager.on("RecordStart", ({ recorder, recordHandle }) => {
+    logger.info("Manager start", recorder, recordHandle);
+    if (!recorder.extra) recorder.extra = {};
+    const timestamp = Date.now();
+    recorder.extra.lastRecordTime = timestamp;
+    void sendRecorderExternalEvent("record_start", {
+      ...getRecorderExternalBase(recorder),
+      time: new Date(timestamp).toISOString(),
+    });
   });
-  manager.on("RecordStop", (debug) => {
-    logger.info("Manager stop", debug);
+  manager.on("RecordStop", ({ recorder }) => {
+    logger.info("Manager stop", recorder);
+    void sendRecorderExternalEvent("record_end", {
+      ...getRecorderExternalBase(recorder),
+    });
+    // 录制结束通知，自动监听&开启推送时才会发送
+    const config = recorderConfig.get(recorder.id);
+    if (!config) return;
+    if (config?.liveEndNotification && !config?.disableAutoCheck) {
+      setTimeout(
+        () => {
+          const trueRecorder = manager.getRecorder(recorder.id);
+          if (!trueRecorder) return;
+          if (trueRecorder?.recordHandle) return;
+          sendEndLiveNotification(appConfig, trueRecorder, config);
+        },
+        1000 * 60 * 3,
+      );
+    }
   });
   manager.on("error", (error) => {
     logger.error("Manager error", error);
   });
   manager.on("RecoderLiveStart", async ({ recorder }) => {
-    // 只有客户端&自动监听&开始推送时才会发送
+    // 录制开始通知，自动监听&开启推送时才会发送
     const config = recorderConfig.get(recorder.id);
     if (!config) return;
     if (config?.liveStartNotification && !config?.disableAutoCheck) {
-      sendLiveNotification(appConfig, recorder, config);
+      sendStartLiveNotification(appConfig, recorder, config);
+    }
+  });
+  manager.on("RecoderChargeLive", async ({ recorder }) => {
+    // 充电直播检测通知，默认开启(仅显式设为 false 时关闭)，自动监听时才发送
+    const config = recorderConfig.get(recorder.id);
+    if (!config) return;
+    const enabled = config?.chargeLiveNotification !== false && !config?.disableAutoCheck;
+    logger.info(
+      `RecoderChargeLive: ${config.remarks}(${config.channelId}) notify=${enabled} chargeLiveNotification=${config.chargeLiveNotification}`,
+    );
+    if (enabled) {
+      sendChargeLiveNotification(appConfig, recorder, config);
     }
   });
   // manager.on("RecordSegment", (debug) => {
   //   console.error("Manager segment", debug);
   // });
-  manager.on("videoFileCreated", async ({ recorder, filename }) => {
-    logger.info("Manager videoFileCreated", { recorder, filename });
-    const startTime = new Date();
+  manager.on("videoFileCreated", async ({ recorder, filename, rawFilename }) => {
+    logger.info("Manager videoFileCreated", { recorder, filename, rawFilename });
+    const videoStartTime = new Date();
+    const liveStartTime = recorder.liveInfo?.liveStartTime;
 
     if (!recorder.liveInfo) {
-      logger.error("Manager videoFileCreated Error", { recorder, filename });
+      logger.error("Manager videoFileCreated Error", { recorder, filename, rawFilename });
       return;
     }
     const data = recorderConfig.get(recorder.id);
@@ -184,19 +468,27 @@ export async function createRecorderManager(appConfig: AppConfig) {
           event: "FileOpening",
           filePath: filename,
           roomId: recorder.channelId,
-          time: startTime.toISOString(),
+          time: videoStartTime.toISOString(),
           title: recorder.liveInfo.title,
           username: recorder.liveInfo.owner,
+          platform: recorder.providerId.toLowerCase(),
+          software: "biliLive-tools",
         },
         {
           proxy: false,
         },
       );
 
+    await sendRecorderExternalEvent("file_created", {
+      filePath: filename,
+      roomId: String(recorder.channelId),
+      platform: recorder.providerId,
+    });
+
     recordHistory.addWithStreamer({
-      live_start_time: recorder.liveInfo.startTime?.getTime(),
+      live_start_time: liveStartTime?.getTime(),
       live_id: recorder?.liveInfo?.liveId,
-      record_start_time: startTime.getTime(),
+      record_start_time: videoStartTime.getTime(),
       room_id: recorder.channelId,
       title: recorder.liveInfo.title,
       video_file: filename,
@@ -204,8 +496,8 @@ export async function createRecorderManager(appConfig: AppConfig) {
       platform: recorder.providerId,
     });
   });
-  manager.on("videoFileCompleted", async ({ recorder, filename }) => {
-    logger.info("Manager videoFileCompleted", { recorder, filename });
+  manager.on("videoFileCompleted", async ({ recorder, filename, stats }) => {
+    logger.info("Manager videoFileCompleted", { recorder, filename, stats });
 
     const endTime = new Date();
     const data = recorderConfig.get(recorder.id);
@@ -215,26 +507,28 @@ export async function createRecorderManager(appConfig: AppConfig) {
     const liveId = recorder?.liveInfo?.liveId;
     const config = appConfig.getAll();
 
-    data?.sendToWebhook &&
-      axios.post(
-        `http://127.0.0.1:${config.port}/webhook/custom`,
-        {
-          event: "FileClosed",
-          filePath: filename,
-          roomId: channelId,
-          time: endTime.toISOString(),
-          title: title,
-          username: username,
-        },
-        {
-          proxy: false,
-        },
-      );
-
-    const xmlFile = replaceExtName(filename, ".xml");
     try {
-      const videoMeta = await readVideoMeta(filename);
-      const duration = videoMeta?.format?.duration ?? 0;
+      const xmlFile = replaceExtName(filename, ".xml");
+
+      let duration = 0;
+      try {
+        const videoMeta = await readVideoMeta(filename);
+        duration = videoMeta?.format?.duration ?? 0;
+      } catch (error) {
+        logger.error("读取视频元信息失败", { filename, error });
+      }
+
+      // 提取文件名（不含后缀）
+      const videoFilename = path.basename(filename, path.extname(filename));
+
+      // 计算文件快速哈希值
+      let quickHash: string | undefined;
+      try {
+        quickHash = await calculateFileQuickHash(filename);
+      } catch (error) {
+        logger.error("计算文件quickHash失败", { filename, error });
+      }
+
       recordHistory.upadteLive(
         {
           video_file: filename,
@@ -242,11 +536,25 @@ export async function createRecorderManager(appConfig: AppConfig) {
         },
         {
           record_end_time: endTime.getTime(),
-          video_duration: isNaN(Number(duration)) ? 0 : duration,
+          video_duration: isNaN(Number(duration)) ? 0 : Math.floor(duration),
+          video_filename: videoFilename,
+          quick_hash: quickHash,
         },
       );
 
-      if (xmlFile && (await fs.pathExists(xmlFile))) {
+      if (data?.saveDanmaStats2DB && stats) {
+        recordHistory.upadteLive(
+          {
+            video_file: filename,
+            live_id: liveId,
+          },
+          {
+            danma_num: stats.danmaNum,
+            interact_num: stats.uniqMember,
+            danma_stats_json: JSON.stringify(stats.danmaStats),
+          },
+        );
+      } else if (xmlFile && (await fs.pathExists(xmlFile))) {
         const { uniqMember, danmaNum } = await danmaReport(xmlFile);
         recordHistory.upadteLive(
           {
@@ -259,10 +567,81 @@ export async function createRecorderManager(appConfig: AppConfig) {
           },
         );
       }
+
+      if (data?.convert2Mp4) {
+        try {
+          await convert2Mp4(filename);
+          await fs.unlink(filename);
+          logger.info("转换 mp4 成功，已删除原文件", { filename });
+        } catch (error) {
+          logger.error("convert2Mp4 error", error);
+        }
+      }
     } catch (error) {
       logger.error("Update live error", { recorder, filename, error });
+    } finally {
+      await sendRecorderExternalEvent("file_completed", {
+        filePath: filename,
+        roomId: String(recorder.channelId),
+        platform: recorder.providerId,
+      });
+
+      if (data?.sendToWebhook) {
+        const webhookUrl = `http://127.0.0.1:${config.port}/webhook/custom`;
+        const payload = {
+          event: "FileClosed",
+          filePath: filename,
+          roomId: channelId,
+          time: endTime.toISOString(),
+          title: title,
+          username: username,
+          platform: recorder.providerId.toLowerCase(),
+          software: "biliLive-tools",
+        };
+
+        logger.debug("Manager videoFileCompleted webhook start", {
+          recorderId: recorder.id,
+          webhookUrl,
+          filePath: filename,
+          roomId: channelId,
+          hasTitle: Boolean(title),
+          hasUsername: Boolean(username),
+        });
+
+        try {
+          await axios.post(webhookUrl, payload, {
+            proxy: false,
+            timeout: 10000,
+          });
+          logger.debug("Manager videoFileCompleted webhook success", {
+            recorderId: recorder.id,
+            webhookUrl,
+            filePath: filename,
+          });
+        } catch (error) {
+          if (axios.isAxiosError(error)) {
+            logger.error("Manager videoFileCompleted webhook error", {
+              recorderId: recorder.id,
+              webhookUrl,
+              filePath: filename,
+              code: error.code,
+              message: error.message,
+              status: error.response?.status,
+              data: error.response?.data,
+            });
+          } else {
+            logger.error("Manager videoFileCompleted webhook error", {
+              recorderId: recorder.id,
+              webhookUrl,
+              filePath: filename,
+              error,
+            });
+          }
+        }
+      }
     }
 
+    const xmlFile = replaceExtName(filename, ".xml");
     if (config.recorder.saveDanma2DB && xmlFile && (await fs.pathExists(xmlFile))) {
       const history = recordHistory.getRecord({
         file: filename,
@@ -325,40 +704,65 @@ export async function createRecorderManager(appConfig: AppConfig) {
           gift_name: item.gift_name,
         });
       }
-      danmuModel.addMany(result, {
+      danmuService.addMany(result, {
         platform: recorder.providerId,
         roomId: recorder.channelId,
       });
     }
   });
 
-  appConfig.on("update", () => {
-    const { ffmpegPath, mesioPath } = getFfmpegPath();
+  appConfig.on("update", (_newVal, _oldVal, key) => {
+    // @ts-ignore
+    if (["tool", "recorders"].includes(key)) return;
+    const { ffmpegPath, mesioPath, bililiveRecorderPath } = getBinPath();
     setFFMPEGPath(ffmpegPath);
     setMesioPath(mesioPath);
+    setBililivePath(bililiveRecorderPath);
     updateRecorderManager(manager, appConfig);
   });
 
   const recorderConfig = new RecorderConfig(appConfig);
   for (const recorder of recorderConfig.list()) {
-    manager.addRecorder({
-      ...recorder,
-      m3u8ProxyUrl: `http://127.0.0.1:${config.port}/bili/stream`,
-    });
+    try {
+      manager.addRecorder({
+        ...recorder,
+        m3u8ProxyUrl: `http://127.0.0.1:${config.port}/bili/stream`,
+      });
+    } catch (error) {
+      logger.error("Add recorder error", { recorder, error });
+      continue;
+    }
   }
 
   if (autoCheckLiveStatusAndRecord) manager.startCheckLoop();
+
+  setTimeout(() => {
+    // 转异步，避免阻塞
+    const data = recordHistory.getLastRecordTimesByChannels(
+      manager.recorders.map((r) => ({ channelId: r.channelId, providerId: r.providerId })),
+    );
+    // console.log("获取上次录制时间完成：", data);
+    for (const recorder of manager.recorders) {
+      const record = data.find(
+        (item) => item.channelId === recorder.channelId && item.providerId === recorder.providerId,
+      );
+      if (record && record.lastRecordTime) {
+        if (!recorder.extra) recorder.extra = {};
+        recorder.extra.lastRecordTime = record.lastRecordTime;
+      }
+    }
+  }, 0);
 
   return {
     manager,
     config: recorderConfig,
     addRecorder: async (recorder: RecorderConfigType) => {
-      const recorders = recorderConfig.list();
+      const recorders = appConfig.get("recorders");
       if (
-        recorders.findIndex(
+        recorders.some(
           (item) =>
             item.channelId === recorder.channelId && item.providerId === recorder.providerId,
-        ) !== -1
+        )
       ) {
         return null;
       }
@@ -373,7 +777,9 @@ export async function createRecorderManager(appConfig: AppConfig) {
       });
 
       if (!data.disableAutoCheck) {
-        manager.startRecord(recoder.id);
+        manager.startRecord(recoder.id, {
+          ignoreDataLimit: true,
+        });
       }
       return recoder;
     },
@@ -385,9 +791,9 @@ export async function createRecorderManager(appConfig: AppConfig) {
 
       return updateRecorder(recorder, args);
     },
-    resolveChannel: async (url: string) => {
+    resolveChannel: async (url: string, options?: ResolveChannelOptions) => {
       for (const provider of manager.providers) {
-        const info = await provider.resolveChannelInfoFromURL(url);
+        const info = await provider.resolveChannelInfoFromURL(url, options);
         if (!info) continue;
 
         return {

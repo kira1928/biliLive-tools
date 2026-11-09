@@ -12,6 +12,7 @@ import trash from "trash";
 import { appConfig } from "../config.js";
 export * from "./webhook.js";
 export * from "./crypto.js";
+export * from "./externalEvent.js";
 import { videoEncoders } from "../enum.js";
 
 import type { FfmpegOptions, VideoCodec } from "@biliLive-tools/types";
@@ -25,6 +26,7 @@ export const executeCommand = (
       command,
       {
         signal,
+        windowsHide: true,
       },
       (error, stdout, stderr) => {
         if (error) {
@@ -85,7 +87,7 @@ export const escaped = (s: string) => {
  */
 export const getHardwareAcceleration = (
   encoder: VideoCodec,
-): "nvenc" | "qsv" | "amf" | "copy" | "cpu" => {
+): "nvenc" | "qsv" | "amf" | "copy" | "cpu" | "videotoolbox" => {
   if (["h264_nvenc", "hevc_nvenc", "av1_nvenc"].includes(encoder)) {
     return "nvenc";
   } else if (["h264_qsv", "hevc_qsv", "av1_qsv"].includes(encoder)) {
@@ -96,12 +98,16 @@ export const getHardwareAcceleration = (
     return "copy";
   } else if (["libx264", "libx265", "libsvtav1"].includes(encoder)) {
     return "cpu";
+  } else if (["h264_videotoolbox", "hevc_videotoolbox", "av1_videotoolbox"].includes(encoder)) {
+    return "videotoolbox";
   } else {
     throw new Error(`未知的编码器: ${encoder}`);
   }
 };
 
 export const genFfmpegParams = (options: FfmpegOptions) => {
+  const hardware = getHardwareAcceleration(options.encoder);
+
   const result: string[] = [];
   if (options.encoder) {
     result.push(`-c:v ${options.encoder}`);
@@ -134,7 +140,11 @@ export const genFfmpegParams = (options: FfmpegOptions) => {
     if (options.preset) {
       const encoder = videoEncoders.find((item) => item.value === options.encoder);
       if ((encoder?.presets ?? []).findIndex((item) => item.value === options.preset) !== -1) {
-        result.push(`-preset ${options.preset}`);
+        if (hardware === "videotoolbox") {
+          result.push(`-realtime ${options.preset}`);
+        } else {
+          result.push(`-preset ${options.preset}`);
+        }
       }
     }
 
@@ -149,8 +159,6 @@ export const genFfmpegParams = (options: FfmpegOptions) => {
   }
   if (options.audioCodec) {
     result.push(`-c:a ${options.audioCodec}`);
-  } else {
-    result.push(`-c:a copy`);
   }
   if (options.extraOptions) {
     options.extraOptions.split(" ").forEach((option) => {
@@ -161,7 +169,8 @@ export const genFfmpegParams = (options: FfmpegOptions) => {
 };
 
 export const uuid = () => {
-  return Math.random().toString(36).slice(2);
+  // 更加安全的UUID生成方法
+  return crypto.randomUUID();
 };
 
 export const pathExists = async (path: string) => {
@@ -177,6 +186,9 @@ export const deleteFile = async (path: string) => {
 };
 
 export const trashItem = async (path: string) => {
+  if (process.env.IS_DOCKER) {
+    return deleteFile(path);
+  }
   const trashConfig = appConfig.get("trash");
   if (trashConfig) {
     return trash(path);
@@ -519,52 +531,80 @@ export function calculateFileMd5(filePath: string, chunkSize: number = 64 * 1024
 }
 
 /**
- * 快速计算文件特征值，只读取文件头部
+ * 快速计算文件特征值，读取文件头部、尾部以及文件大小
  * @param filePath 文件路径
- * @param readSize 读取的字节数，默认10MB
+ * @param headSize 读取头部的字节数，默认1MB
+ * @param tailSize 读取尾部的字节数，默认1MB
  * @returns SHA256哈希值
  */
-export function calculateFileQuickHash(
+export async function calculateFileQuickHash(
   filePath: string,
-  readSize: number = 10 * 1024 * 1024,
+  headSize: number = 1 * 1024 * 1024,
+  tailSize: number = 1 * 1024 * 1024,
 ): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const hash = crypto.createHash("sha256");
-    const stream = createReadStream(filePath, {
+  const hash = crypto.createHash("sha256");
+  const fileSize = await getFileSize(filePath);
+
+  // 将文件大小纳入hash计算
+  hash.update(Buffer.from(fileSize.toString()));
+
+  // 如果文件小于等于头部大小，直接读取整个文件
+  if (fileSize <= headSize) {
+    return new Promise((resolve, reject) => {
+      const stream = createReadStream(filePath);
+
+      stream.on("data", (chunk) => {
+        hash.update(chunk);
+      });
+
+      stream.on("end", () => {
+        resolve(hash.digest("hex"));
+      });
+
+      stream.on("error", reject);
+    });
+  }
+
+  // 读取头部
+  await new Promise<void>((resolve, reject) => {
+    const headStream = createReadStream(filePath, {
       start: 0,
-      end: readSize - 1,
-      highWaterMark: 64 * 1024, // 64KB chunks
+      end: headSize - 1,
+      highWaterMark: 64 * 1024,
     });
 
-    stream.on("data", (chunk) => {
+    headStream.on("data", (chunk) => {
       hash.update(chunk);
     });
 
-    stream.on("end", () => {
-      resolve(hash.digest("hex"));
+    headStream.on("end", () => {
+      resolve();
     });
 
-    stream.on("error", (error: NodeJS.ErrnoException) => {
-      // 如果文件小于readSize，会触发EOVERFLOW错误
-      if (error.code === "EOVERFLOW") {
-        // 如果文件较小，直接读取整个文件
-        const fullStream = createReadStream(filePath);
-        const newHash = crypto.createHash("sha256");
-
-        fullStream.on("data", (chunk) => {
-          newHash.update(chunk);
-        });
-
-        fullStream.on("end", () => {
-          resolve(newHash.digest("hex"));
-        });
-
-        fullStream.on("error", reject);
-      } else {
-        reject(error);
-      }
-    });
+    headStream.on("error", reject);
   });
+
+  // 读取尾部
+  await new Promise<void>((resolve, reject) => {
+    const tailStart = Math.max(headSize, fileSize - tailSize);
+    const tailStream = createReadStream(filePath, {
+      start: tailStart,
+      end: fileSize - 1,
+      highWaterMark: 64 * 1024,
+    });
+
+    tailStream.on("data", (chunk) => {
+      hash.update(chunk);
+    });
+
+    tailStream.on("end", () => {
+      resolve();
+    });
+
+    tailStream.on("error", reject);
+  });
+
+  return hash.digest("hex");
 }
 
 /**
@@ -598,4 +638,57 @@ export function retryWithAxiosError<T>(
     }
     attempt(times);
   });
+}
+
+/**
+ * 检查是否在时间范围内
+ */
+export const isBetweenTimeRange = (range: undefined | [] | [string, string]): boolean => {
+  if (!range) return true;
+  if (range.length !== 2) return true;
+
+  try {
+    const status = isBetweenTime(new Date(), range);
+    return status;
+  } catch (error) {
+    return true;
+  }
+};
+
+/**
+ * 替换四字节Unicode字符（如部分emoji表情）为U+FFFD
+ * @param str 输入字符串
+ * @param replacement 替换字符，默认为_
+ * @returns 替换后的字符串
+ */
+export function replaceFourByteUnicode(str: string, replacement: string = "_"): string {
+  return str.replace(/[\uD800-\uDBFF][\uDC00-\uDFFF]/g, replacement);
+}
+
+/**
+ * 将十六进制 RGB 或 RGBA 颜色转换为 BGR 或 ABGR 颜色。
+ *
+ * 输入可带或不带 `#`，格式为 `RRGGBB` 或 `RRGGBBAA`；返回值始终带 `#`。
+ * RGBA 输入默认会反转 alpha（`FF - AA`）。例如：`#112233` 转换为 `#332211`，
+ * `#11223344` 转换为 `#bb332211`；将 `reverseAlpha` 设为 `false` 时转换为 `#44332211`。
+ *
+ * @param color RGB 或 RGBA 十六进制颜色
+ * @param reverseAlpha 是否反转 RGBA 的 alpha，默认为 `true`
+ * @returns BGR 或 ABGR 十六进制颜色
+ * @throws 输入不是 6 位或 8 位十六进制颜色时抛出错误
+ */
+export function RGB2BGR(color: string, reverseAlpha = true): string {
+  if (!/^#?(?:[0-9A-Fa-f]{6}|[0-9A-Fa-f]{8})$/.test(color)) {
+    throw new Error("Invalid color format. Expected hex string like '#RRGGBB' or '#RRGGBBAA'.");
+  }
+  const hex = color.replace("#", "");
+  const r = hex.slice(0, 2);
+  const g = hex.slice(2, 4);
+  const b = hex.slice(4, 6);
+  const originalAlpha = hex.slice(6, 8);
+  const alpha =
+    originalAlpha && reverseAlpha
+      ? (0xff - Number.parseInt(originalAlpha, 16)).toString(16).padStart(2, "0")
+      : originalAlpha;
+  return `#${alpha}${b}${g}${r}`;
 }

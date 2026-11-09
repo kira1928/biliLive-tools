@@ -6,7 +6,7 @@ import { BaiduPCS, AliyunPan, Alist, LocalCopy, Pan123 } from "../sync/index.js"
 import { pan123Login as pan123LoginAPi, getToken as getPan123AccessToken } from "../sync/pan123.js";
 import { trashItem } from "../utils/index.js";
 
-import type { SyncType } from "@biliLive-tools/types";
+import type { SyncType, SyncConfig, AliyunPanDriveType } from "@biliLive-tools/types";
 
 const getConfig = (type: SyncType) => {
   const config = appConfig.getAll();
@@ -17,6 +17,7 @@ const getConfig = (type: SyncType) => {
       username: config.sync[type as "alist"].username,
       password: config.sync[type as "alist"].hashPassword,
       limitRate: config.sync[type as "alist"].limitRate,
+      retry: config.sync[type as "alist"].retry,
     };
   } else if (["aliyunpan", "baiduPCS"].includes(type)) {
     return {
@@ -41,12 +42,15 @@ const createUploadInstance = async (opts: {
   type: SyncType;
   execPath: string;
   remotePath: string;
+  aliyunpanDriveType?: AliyunPanDriveType;
   apiUrl?: string;
   username?: string;
   password?: string;
   clientId?: string;
   clientSecret?: string;
   limitRate?: number;
+  stringFilters?: SyncConfig["stringFilters"];
+  retry?: number;
 }) => {
   if (opts.type === "baiduPCS") {
     return new BaiduPCS({
@@ -57,6 +61,7 @@ const createUploadInstance = async (opts: {
     return new AliyunPan({
       binary: opts.execPath,
       remotePath: opts.remotePath ?? "",
+      driveType: opts.aliyunpanDriveType,
     });
   } else if (opts.type === "alist") {
     return new Alist({
@@ -65,6 +70,8 @@ const createUploadInstance = async (opts: {
       password: opts.password,
       remotePath: opts.remotePath ?? "",
       limitRate: opts.limitRate ?? 0,
+      stringFilters: opts.stringFilters,
+      retry: opts.retry,
     });
   } else if (opts.type === "copy") {
     return new LocalCopy({
@@ -89,7 +96,6 @@ export const addSyncTask = async ({
   input,
   remotePath,
   execPath,
-  retry,
   policy,
   type,
   removeOrigin,
@@ -98,6 +104,8 @@ export const addSyncTask = async ({
   password,
   clientId,
   clientSecret,
+  aliyunpanDriveType,
+  stringFilters,
 }: {
   input: string;
   remotePath?: string;
@@ -111,6 +119,8 @@ export const addSyncTask = async ({
   password?: string;
   clientId?: string;
   clientSecret?: string;
+  aliyunpanDriveType?: AliyunPanDriveType;
+  stringFilters?: SyncConfig["stringFilters"];
 }) => {
   const {
     binary: binaryPath,
@@ -120,6 +130,7 @@ export const addSyncTask = async ({
     clientId: iClientId,
     clientSecret: iClientSecret,
     limitRate,
+    retry,
   } = getConfig(type);
   const instance = await createUploadInstance({
     type,
@@ -130,7 +141,10 @@ export const addSyncTask = async ({
     password: password ?? iPassword,
     clientId: clientId ?? iClientId,
     clientSecret: clientSecret ?? iClientSecret,
+    aliyunpanDriveType,
     limitRate: limitRate ?? 0,
+    stringFilters,
+    retry,
   });
 
   const task = new SyncTask(

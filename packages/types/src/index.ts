@@ -33,12 +33,69 @@ export * from "./preset.js";
 //   timeshift: number;
 // };
 
+export const recorderNoGlobalFollowFields: Array<
+  Exclude<
+    keyof Recorder,
+    | "providerId"
+    | "id"
+    | "channelId"
+    | "remarks"
+    | "extra"
+    | "disableAutoCheck"
+    | "sendToWebhook"
+    | "streamPriorities"
+    | "sourcePriorities"
+    | "noGlobalFollowFields"
+    | "line"
+    | "titleKeywords"
+    | "liveStartNotification"
+    | "chargeLiveNotification"
+    | "liveEndNotification"
+    | "onlyAudio"
+    | "handleTime"
+    | "weight"
+  >
+> = [
+  "quality",
+  "disableProvideCommentsWhenRecording",
+  "saveGiftDanma",
+  "saveSCDanma",
+  "saveDanmaStats2DB",
+  "segment",
+  "uid",
+  "saveCover",
+  "convert2Mp4",
+  "qualityRetry",
+  "formatName",
+  "useM3U8Proxy",
+  "customHost",
+  "segmentOnTitleChange",
+  "codecName",
+  "source",
+  "videoFormat",
+  "recorderType",
+  "cookie",
+  "cookieMode",
+  "proxy",
+  "doubleScreen",
+  "useServerTimestamp",
+];
+
 // 通用预设
 export type CommonPreset<T> = {
   id: string;
   name: string;
   config: T;
 };
+
+export interface PartTitleFormatOptions {
+  title: string;
+  username: string;
+  time: string;
+  roomId: string | number;
+  filename: string;
+  index: number;
+}
 
 // ffmpeg预设配置
 export type FfmpegPreset = CommonPreset<FfmpegOptions>;
@@ -50,8 +107,10 @@ export type CommonRoomConfig = {
   title: string;
   uploadPresetId?: string;
   danmu: boolean;
-  ffmpegPreset?: string;
-  danmuPreset?: string;
+  /** 弹幕为空或不存在时仍进行压制 */
+  burnWithoutDanmu?: boolean;
+  ffmpegPreset?: string | null;
+  danmuPreset?: string | null;
   autoPartMerge: boolean;
   partMergeMinute?: number;
   uid?: number;
@@ -69,10 +128,18 @@ export type CommonRoomConfig = {
   hotProgressFillColor?: string;
   /** 转封装为mp4 */
   convert2Mp4?: boolean;
-  /** 转封装后删除源文件 */
+  /** 废弃：转封装后删除源文件 */
   removeSourceAferrConvert2Mp4?: boolean;
+  /** flv修复 */
+  flvRepair?: boolean;
   /** 压制完成后的操作 */
-  afterConvertAction?: Array<"removeVideo" | "removeXml">;
+  afterConvertAction?: Array<
+    | "removeVideo"
+    | "removeXml"
+    | "removeAfterConvert2Mp4"
+    | "removeSmallFile"
+    | "removeAfterFlvRepair"
+  >;
   /** 限制只在某一段时间处理视频 */
   limitVideoConvertTime?: boolean;
   /** 允许视频处理时间 */
@@ -86,10 +153,12 @@ export type CommonRoomConfig = {
   /** 分p标题模板 */
   partTitleTemplate: string;
   /** 同步器配置ID */
-  syncId?: string;
+  syncId?: string | null;
 
   // 上传非弹幕版选项
   uploadNoDanmu?: boolean;
+  // 将处理版和非弹幕版上传到同一稿件
+  uploadToSameMedia?: boolean;
   // 上传非视频版预设
   noDanmuVideoPreset?: string;
 };
@@ -180,6 +249,14 @@ export type ToolConfig = {
     /** 合并弹幕 */
     mergeXml: boolean;
   };
+  flvRepair: {
+    /** 修复器 */
+    type: "bililive" | "mesio";
+    /** 保存类型 */
+    saveRadio: 1 | 2;
+    /** 保存路径 */
+    savePath: string;
+  };
   /** 下载页 */
   download: {
     /** 保存路径 */
@@ -192,6 +269,8 @@ export type ToolConfig = {
     override: boolean;
     /** 只下载音频 */
     onlyAudio: boolean;
+    /** 只下载弹幕 */
+    onlyDanmu: boolean;
   };
   /** 切片 */
   videoCut: {
@@ -209,6 +288,14 @@ export type ToolConfig = {
     danmuPresetId: string;
     /** 忽略弹幕 */
     ignoreDanmu: boolean;
+    /** 字幕导出 */
+    exportSubtitle: boolean;
+    /** 忽略字幕 */
+    ignoreSubtitle: boolean;
+    /** 字幕样式ID */
+    subtitleStyleId?: string;
+    /** 上传预设 */
+    uploadPresetId: string;
   };
   /** 文件同步 */
   fileSync: {
@@ -216,6 +303,8 @@ export type ToolConfig = {
     removeOrigin: boolean;
     /** 同步类型 */
     syncType?: AppConfig["sync"]["syncConfigs"][number]["syncSource"];
+    /** 阿里云盘上传位置 */
+    aliyunpanDriveType?: AliyunPanDriveType;
     /** 目标路径 */
     targetPath: string;
   };
@@ -274,13 +363,13 @@ export interface NotificationPushAllInAllConfig {
  * 自定义HTTP通知配置
  */
 export interface NotificationCustomHttpConfig {
-  /** 请求URL */
+  /** 请求URL，支持{{title}}、{{desc}}以及上下文占位符 */
   url: string;
   /** 请求方法 */
   method?: "GET" | "POST" | "PUT";
-  /** 请求体，支持{{title}}和{{desc}}占位符 */
+  /** 请求体，支持{{title}}、{{desc}}以及上下文占位符 */
   body?: string;
-  /** 请求头，每行一个，格式为key: value */
+  /** 请求头，每行一个，格式为key: value，支持占位符 */
   headers?: string;
 }
 
@@ -288,11 +377,20 @@ export type Theme = "system" | "light" | "dark";
 type FormatName = "auto" | "flv" | "hls" | "fmp4" | "flv_only" | "hls_only" | "fmp4_only";
 type CodecName = "auto" | "avc" | "hevc" | "avc_only" | "hevc_only";
 
-interface BilibiliRecorderConfig {
+interface RecorderCheckConfig {
+  /** 检查间隔 */
+  checkInterval?: number;
+  /** 并发数 */
+  maxThreadCount?: number;
+  /** 等待时间 */
+  waitTime?: number;
+}
+
+interface BilibiliRecorderConfig extends RecorderCheckConfig {
   /** 账号 */
   uid?: number;
-  /** 画质 30000：杜比 20000：4K 10000：原画 400：蓝光 250：超清 150：高清 80：流畅 */
-  quality: 30000 | 20000 | 10000 | 400 | 250 | 150 | 80;
+  /** 画质 30000：杜比 20000：4K 25000：原画真彩 15000：2K 10000：原画 400：蓝光 250：超清 150：高清 80：流畅 */
+  quality: 30000 | 20000 | 25000 | 15000 | 10000 | 400 | 250 | 150 | 80;
   /** 使用批量查询接口  */
   useBatchQuery: boolean;
   /** 使用本地反向代理避免分段 */
@@ -301,31 +399,57 @@ interface BilibiliRecorderConfig {
   formatName: FormatName;
   /** 流编码 */
   codecName: CodecName;
+  /** 自定义host */
+  customHost?: string;
+  /** 直播间标题变更时分段 */
+  segmentOnTitleChange: boolean;
 }
-interface DouyuRecorderConfig {
+interface DouyuRecorderConfig extends RecorderCheckConfig {
+  /** 登录账号 */
+  uid?: number;
   /** 画质：0：原画 2：高清 3：超清 4：蓝光4M 8：蓝光8M */
   quality: 0 | 2 | 3 | 4 | 8;
   source: string;
+  /** 流编码 */
+  codecName: CodecName;
+  api: "auto" | "newAPI" | "oldAPI";
 }
 
-interface HuyaRecorderConfig {
+interface HuyaRecorderConfig extends RecorderCheckConfig {
   /** 画质：0:原画 14100: 2khdr 14000: 2k 4200:hdr(10m) 8000:蓝光8m 4000:蓝光4m 2000:超清 500:流畅 */
   quality: 0 | 20000 | 10000 | 14100 | 14000 | 4200 | 8000 | 4000 | 2000 | 500;
   /** 流格式 */
   formatName: FormatName;
   source: string;
+  /** 接口类型 */
+  api: "auto" | "web" | "wup" | "mp";
 }
 
-interface DouyinRecorderConfig {
+interface DouyinRecorderConfig extends RecorderCheckConfig {
   quality: "origin" | "uhd" | "hd" | "sd" | "ld" | "ao" | "real_origin";
   /** 抖音cookie */
   cookie: string;
+  /** Cookie 使用范围，默认为全部 */
+  cookieMode: "all" | "stream" | "danma";
   /** 流格式 */
   formatName: FormatName;
   /** 是否使用双屏直播流 */
   doubleScreen: boolean;
   /** 接口类型 */
   api: "web" | "webHTML" | "mobile" | "userHTML" | "balance" | "random";
+}
+
+interface XhsRecorderConfig extends RecorderCheckConfig {
+  cookie: string;
+}
+
+interface TikTokRecorderConfig extends RecorderCheckConfig {
+  quality: "origin" | "uhd" | "hd" | "sd" | "ld" | "ao" | "real_origin";
+  cookie: string;
+  formatName: FormatName;
+  codecName: CodecName;
+  api: "random" | "web" | "webHTML" | "auto" | "app";
+  proxy: string;
 }
 
 // 录制全局配置
@@ -338,9 +462,15 @@ export interface GlobalRecorder {
   autoRecord: boolean;
   /** 检查间隔 */
   checkInterval: number;
-  /** 调试模式 */
+  /** 并发数 */
+  maxThreadCount: number;
+  /** 等待时间 */
+  waitTime: number;
+  /** 废弃：调试模式 */
   debugMode: boolean;
-  /** 测试：录制错误立即重试 */
+  /** 调试等级 */
+  debugLevel: "none" | "basic" | "verbose";
+  /** 下播延迟检查 */
   recordRetryImmediately: boolean;
   /** 画质 */
   quality: "lowest" | "low" | "medium" | "high" | "highest";
@@ -355,19 +485,23 @@ export interface GlobalRecorder {
   /** 弹幕是否使用服务端时间戳 */
   useServerTimestamp: boolean;
   /**分段时长，单位分钟 */
-  segment?: number;
+  segment?: string;
   /** 账号 */
   uid?: number;
   /** 保存封面 */
   saveCover?: boolean;
+  /** 转封装为 mp4 */
+  convert2Mp4?: boolean;
   /** 画质匹配重试次数 */
   qualityRetry: number;
   /** 视频格式 */
   videoFormat: "auto" | "ts" | "mkv";
   /** 支持的录制器 */
-  recorderType: "auto" | "ffmpeg" | "mesio";
+  recorderType: "auto" | "ffmpeg" | "mesio" | "bililive";
   /** 保存弹幕测试 */
   saveDanma2DB: boolean;
+  /** 将弹幕统计保存到数据库 */
+  saveDanmaStats2DB: boolean;
   /** B站特有的配置 */
   bilibili: BilibiliRecorderConfig;
   /** 斗鱼特有的配置 */
@@ -376,10 +510,14 @@ export interface GlobalRecorder {
   huya: HuyaRecorderConfig;
   /** 抖音特有的配置 */
   douyin: DouyinRecorderConfig;
+  /** 小红书特有的配置 */
+  xhs: XhsRecorderConfig;
+  /** TikTok 特有的配置 */
+  tiktok: TikTokRecorderConfig;
 }
 
 export interface Recorder {
-  providerId: "DouYu" | "HuYa" | "Bilibili" | "DouYin";
+  providerId: "DouYu" | "HuYa" | "Bilibili" | "DouYin" | "XHS" | "TikTok";
   id: string;
   channelId: string;
   remarks?: string;
@@ -387,10 +525,11 @@ export interface Recorder {
   sourcePriorities: any[];
   extra: {
     createTimestamp?: number;
-    /** B站主播的uid */
-    recorderUid?: number;
+    /** B站主播的uid，抖音的sec_uid */
+    recorderUid?: number | string;
     /** 头像 */
     avatar?: string;
+    lastRecordTime?: number | null;
   };
   disableAutoCheck?: boolean;
   /** 发送至发送至软件webhook */
@@ -417,13 +556,17 @@ export interface Recorder {
   /** 保存高能弹幕 */
   saveSCDanma?: boolean;
   /**分段时长，单位分钟 */
-  segment?: number;
+  segment?: string;
   /** 账号 */
   uid?: number | string;
   /** 保存封面 */
   saveCover?: boolean;
+  /** 转封装为 mp4 */
+  convert2Mp4?: boolean;
   /** 视频格式 */
   videoFormat: GlobalRecorder["videoFormat"];
+  /** 将弹幕统计保存到数据库 */
+  saveDanmaStats2DB?: GlobalRecorder["saveDanmaStats2DB"];
   /** 录制器类型 */
   recorderType: GlobalRecorder["recorderType"];
   qualityRetry: GlobalRecorder["qualityRetry"];
@@ -431,14 +574,27 @@ export interface Recorder {
   useM3U8Proxy: GlobalRecorder["bilibili"]["useM3U8Proxy"];
   codecName: GlobalRecorder["bilibili"]["codecName"];
   source: GlobalRecorder["douyu"]["source"];
-  /** 标题关键词，如果直播间标题包含这些关键词，则不会自动录制（仅对斗鱼有效），多个关键词用英文逗号分隔 */
+  /** 标题关键词，如果直播间标题包含这些关键词，则不会自动录制，支持两种格式：
+   * 1. 逗号分隔的关键词：'回放,录播,重播'
+   * 2. 正则表达式：'/pattern/flags'（如：'/回放|录播/i'）
+   */
   titleKeywords?: string;
+  /** B站直播间标题变更时分段 */
+  segmentOnTitleChange?: boolean;
   /** 开播推送 */
   liveStartNotification?: boolean;
+  /** 充电直播(付费/DRM 加密直播)检测推送 */
+  chargeLiveNotification?: boolean;
+  /** 录制结束通知 */
+  liveEndNotification?: boolean;
   /** 权重 */
   weight: number;
-  /** 抖音cookie */
+  /** 平台 Cookie */
   cookie?: string;
+  /** 抖音 Cookie 使用范围 */
+  cookieMode?: DouyinRecorderConfig["cookieMode"];
+  /** 请求和录制使用的代理 */
+  proxy?: string;
   /** 是否使用双屏直播流 */
   doubleScreen?: boolean;
   /** 流格式优先级 */
@@ -447,31 +603,23 @@ export interface Recorder {
   onlyAudio?: boolean;
   /** 监控时间段 */
   handleTime: [string | null, string | null];
+  /** 调试等级 */
+  debugLevel: "none" | "basic" | "verbose";
+  /** 平台请求接口 */
+  api:
+    | HuyaRecorderConfig["api"]
+    | DouyinRecorderConfig["api"]
+    | DouyuRecorderConfig["api"]
+    | TikTokRecorderConfig["api"];
+  /** 自定义host */
+  customHost?: string;
   // 不跟随全局配置字段
-  noGlobalFollowFields: Array<
-    Exclude<
-      keyof Recorder,
-      | "providerId"
-      | "id"
-      | "channelId"
-      | "remarks"
-      | "extra"
-      | "disableAutoCheck"
-      | "sendToWebhook"
-      | "streamPriorities"
-      | "sourcePriorities"
-      | "noGlobalFollowFields"
-      | "line"
-      | "titleKeywords"
-      | "liveStartNotification"
-      | "onlyAudio"
-      | "handleTime"
-      | "weight"
-    >
-  >;
+  noGlobalFollowFields: typeof recorderNoGlobalFollowFields;
 }
 
 export type SyncType = "baiduPCS" | "aliyunpan" | "alist" | "pan123" | "copy";
+
+export type AliyunPanDriveType = "backup" | "resource";
 
 export type SyncConfig = {
   id: string;
@@ -479,6 +627,8 @@ export type SyncConfig = {
   syncSource: SyncType;
   folderStructure: string;
   targetFiles: ("source" | "danmaku" | "xml" | "cover")[];
+  aliyunpanDriveType?: AliyunPanDriveType;
+  stringFilters?: "filterFourByteChars"[];
 };
 
 // 全局配置
@@ -493,8 +643,14 @@ export interface AppConfig {
   losslessCutPath: string;
   /** mesio 可执行路径 */
   mesioPath: string;
+  /** 录播姬引擎 可执行路径 */
+  bililiveRecorderPath: string;
+  /** audiowaveform 可执行路径 */
+  audiowaveformPath: string;
   /** 缓存文件夹 */
   cacheFolder: string;
+  /** 上传崩溃报告 */
+  uploadCrashReport: boolean;
   /** 保存到回收站 */
   trash: boolean;
   /** 自动检查更新 */
@@ -509,11 +665,18 @@ export interface AppConfig {
   closeToTray: boolean;
   /** 主题 */
   theme: Theme;
+  menuBarVisible: boolean;
+  /** 阻止系统进入休眠（仅 Electron 客户端） */
+  preventSystemSleep: boolean;
   port: number;
   host: string;
   passKey: string;
   https?: boolean;
   requestInfoForRecord: boolean;
+  biliUploadFileNameType: "ask" | "always" | "never";
+  cutPageInNewWindow: boolean;
+  /** 外部Webhook地址 */
+  externalWebhook: string;
   webhook: {
     recoderFolder: string;
     blacklist: string;
@@ -529,10 +692,21 @@ export interface AppConfig {
   bilibiliUser: {
     [uid: number]: string;
   };
+  /** 加密后的斗鱼登录信息 */
+  douyuUser: {
+    [uid: number]: string;
+  };
   /** 当前使用的b站uid */
   uid?: number;
   /** 工具页配置 */
   tool: ToolConfig;
+  /** 切片 */
+  videoCut: {
+    /** 自动保存 */
+    autoSave: boolean;
+    /** 缓存波形图数据 */
+    cacheWaveform: boolean;
+  };
   /** 通知配置 */
   notification: {
     /** 任务 */
@@ -544,6 +718,8 @@ export interface AppConfig {
       douyuDownload: NotificationTaskStatus[];
       mediaStatusCheck: NotificationTaskStatus[];
       sync: NotificationTaskStatus[];
+      /** 斗鱼账号预计过期前提醒（按登录创建时间起 60 天计算） */
+      douyuAccountExpiry: boolean;
       diskSpaceCheck: {
         values: Array<"bilirecorder" | "bililiveTools">;
         /** 磁盘空间不足阈值，单位GB */
@@ -553,7 +729,7 @@ export interface AppConfig {
     /** 通知配置项 */
     setting: {
       // 通知类型，支持server酱和邮件
-      type?: "server" | "mail" | "tg" | "system" | "ntfy" | "allInOne" | "customHttp";
+      type?: "server" | "mail" | "tg" | "system" | "ntfy" | "allInOne" | "customHttp" | null;
       // server酱key
       server: NotificationServerConfig;
       mail: NotificationMailConfig;
@@ -564,6 +740,8 @@ export interface AppConfig {
     };
     taskNotificationType: {
       liveStart: AppConfig["notification"]["setting"]["type"];
+      chargeLive?: AppConfig["notification"]["setting"]["type"];
+      douyuAccountExpiry?: AppConfig["notification"]["setting"]["type"];
     };
   };
   // 同步
@@ -579,6 +757,7 @@ export interface AppConfig {
       username: string;
       hashPassword: string;
       limitRate: number; // KB
+      retry: number;
     };
     pan123: {
       clientId: string;
@@ -606,8 +785,55 @@ export interface AppConfig {
     /** 创造性 */
     temperature: number;
   }[];
+  // ai配置
+  ai: {
+    vendors: {
+      id: string;
+      // 供应商
+      provider: "aliyun" | "openai" | "ffmpeg";
+      // 命名，不能重复
+      name: string;
+      // apiKey
+      apiKey: string;
+      // baseURL
+      baseURL?: string;
+    }[];
+    // 模型配置
+    models: {
+      modelId: string;
+      vendorId: string;
+      modelName: string;
+      remark?: string;
+      tags: Array<"llm" | "asr">;
+      config: Record<string, any>;
+    }[];
+    // 歌曲asr识别配置
+    songRecognizeAsr: {
+      modelId?: string;
+    };
+    // 歌曲llm识别配置
+    songRecognizeLlm: {
+      modelId?: string;
+      prompt: string;
+      enableSearch: boolean;
+      maxInputLength: number;
+      enableStructuredOutput?: boolean;
+      lyricOptimize: boolean;
+    };
+    // 歌词优化配置
+    songLyricOptimize: {
+      modelId?: string;
+      prompt: string;
+      enableStructuredOutput?: boolean;
+    };
+    // 字幕识别
+    subtitleRecognize: {
+      modelId?: string;
+    };
+  };
   /** 最大任务数 */
   task: {
+    maxNum: number;
     ffmpegMaxNum: number;
     douyuDownloadMaxNum: number;
     biliUploadMaxNum: number;
@@ -628,6 +854,8 @@ export interface AppConfig {
     limitRate: number;
     /** 检查稿件间隔 */
     checkInterval: number;
+    /** 投稿最短间隔 */
+    minUploadInterval: number;
     /** 账号授权自动更新 */
     accountAutoCheck: boolean;
     /** 使用必剪api */
@@ -729,13 +957,48 @@ export type VideoCodec =
   | "libsvtav1"
   | "av1_qsv"
   | "av1_nvenc"
-  | "av1_amf";
+  | "av1_amf"
+  | "h264_videotoolbox"
+  | "hevc_videotoolbox"
+  | "av1_videotoolbox";
+
+export interface SubtitleOptions {
+  // 字体名称
+  fontName?: string | null;
+  // 字幕字体大小
+  fontSize?: number;
+  // 主颜色 (文字颜色，格式: &HBBGGRR& 或 #RRGGBB)
+  primaryColour?: string;
+  // 边框颜色 (格式: &HBBGGRR& 或 #RRGGBB)
+  outlineColour?: string;
+  // 阴影颜色 (格式: &HBBGGRR& 或 #RRGGBB)
+  backColour?: string;
+  // 粗体 (0=关闭, -1=开启)
+  bold?: number;
+  // 斜体 (0=关闭, -1=开启)
+  italic?: number;
+  // 下划线 (0=关闭, -1=开启)
+  underline?: number;
+  // 边框宽度
+  outline?: number;
+  // 阴影距离
+  shadow?: number;
+  // 对齐方式 (1=左下, 2=居中下, 3=右下, 5=左上, 6=居中上, 7=右上, 9=左中, 10=居中, 11=右中)
+  alignment?: number;
+  // 左边距
+  marginL?: number;
+  // 右边距
+  marginR?: number;
+  // 垂直边距
+  marginV?: number;
+}
+
 export interface FfmpegOptions {
   encoder: VideoCodec;
   bitrateControl?: "CRF" | "ABR" | "CBR" | "VBR" | "CQ" | "ICQ";
   crf?: number;
   bitrate?: number;
-  audioCodec?: audioCodec;
+  audioCodec?: audioCodec | null;
   preset?:
     | "ultrafast"
     | "superfast"
@@ -776,6 +1039,8 @@ export interface FfmpegOptions {
   decode?: boolean;
   /** 是否重缩放分辨率 */
   resetResolution?: boolean;
+  /** 输出帧率，使用 fps 滤镜实现 */
+  fps?: number;
   /** 重缩放的分辨率 */
   resolutionWidth?: number;
   resolutionHeight?: number;
@@ -816,23 +1081,29 @@ export interface FfmpegOptions {
   timestampFollowDanmu?: boolean;
   /** pk优化 */
   pkOptimize?: boolean;
+  subtitleOptions?: SubtitleOptions;
 }
 
 export interface BiliupConfig {
   /** 标题,稿件标题限制80字，去除前后空格 */
   title: string;
+  /** 分P标题模板 */
+  partTitleTemplate?: string;
   /** 简介，去除前后空格，最多250 */
   desc?: string;
   dolby: 0 | 1; // 杜比
   hires: 0 | 1; // Hi-Res
-  copyright: 1 | 2; // 1：自制，2：转载
+  copyright: 1 | 2 | 3; // 1：自制，2：转载，3：其他创作声明
   tag: string[]; // 标签，不能为空，不能超过10个，调用接口验证
-  tid: number; // 174 投稿分区
+  // @deprecated，174 投稿分区
+  tid: number;
   source?: string; // 转载来源
   dynamic?: string; // 空间动态
   /** 封面，可能为文件名也有可能是绝对路径 */
   cover?: string; // 封面
   noReprint?: 0 | 1; // 自制声明 0: 允许转载，1：禁止转载
+  watermark?: 0 | 1; // 添加水印 0：关闭，1：开启
+  /** 弃用 */
   openElec?: 0 | 1; // 充电面板 0：不开启，1：开启
   closeDanmu?: 0 | 1; // 关闭弹幕 0：不关闭，1：关闭
   closeReply?: 0 | 1; // 关闭评论 0：不关闭，1：关闭
@@ -840,6 +1111,8 @@ export interface BiliupConfig {
   selectiionReply?: 0 | 1;
   /** 合集id */
   seasonId?: number | null;
+  /** 合集中稿件的标题模板，默认 {{mediaTitle}}（视频标题） */
+  seasonTitleTemplate?: string;
   /** 小节id */
   sectionId?: number;
   /** 创建该预设的uid */
@@ -862,10 +1135,20 @@ export interface BiliupConfig {
   topic_name?: string | null;
   /** 是否仅自己可见 */
   is_only_self?: 0 | 1;
+  /** 在个人空间-投稿中隐藏：1：隐藏，2：不隐藏 */
+  space_hidden?: 1 | 2;
   /** 新分区 */
   human_type2?: number;
   /** 定时发布：10位秒级时间戳。必须距离提交时间>7200秒 */
   dtime?: number;
+  /** 关联预约 */
+  act_reserve?: { sid: number };
+  /** 联合投稿 */
+  staffs?: Array<{ title: string; mid: number; name?: string }>;
+  // 表示按照cid顺序上传，编辑接口会根据这个参数对pathArray进行排序后上传，如果没有这个参数，则按照pathArray的顺序上传
+  sortByCid?: Array<number>;
+  // 创作声明，仅当copyright=1、3时有效，// -1: 内容无需标注，1: 含AI生成内容，2：含虚构演绎内容，3：内容含营销信息，4：个人观点，仅供参考
+  creationStatement?: -1 | 1 | 2 | 3 | 4 | null;
 }
 
 export type BiliupConfigAppend = Partial<BiliupConfig> & {
@@ -893,6 +1176,22 @@ export interface BiliUser {
   accessToken: string;
   refreshToken: string;
   platform: "TV";
+}
+
+export interface DouyuLoginCookies {
+  passport: string;
+  main: string;
+}
+
+export interface DouyuUser {
+  uid: number;
+  name: string;
+  avatar?: string;
+  loginCookies: DouyuLoginCookies;
+  /** 当前登录记录的创建时间，重新登录时重置，Unix 毫秒时间戳 */
+  createdAt: number;
+  /** 最近更新登录信息的时间，Unix 毫秒时间戳 */
+  updatedAt: number;
 }
 
 export type HotProgressOptions = {
@@ -960,6 +1259,8 @@ export interface GlobalConfig {
   defaultFfmpegPath: string;
   defaultFfprobePath: string;
   defaultMesioPath: string;
+  defaultBililiveRecorderPath: string;
+  defaultAudioWaveformPath: string;
   defaultDanmakuFactoryPath: string;
   version: string;
   userDataPath: string;

@@ -1,12 +1,17 @@
 {
   "name": "@biliLive-tools/http",
-  "version": "3.1.2",
+  "version": "4.1.0",
   "type": "module",
   "description": "",
   "main": "./lib/index.js",
   "author": "renmu123",
   "license": "GPL-3.0",
   "homepage": "https://github.com/renmu123/biliLive-tools",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/renmu123/biliLive-tools",
+    "directory": "packages/http"
+  },
   "exports": {
     ".": {
       "types": "./src/index.ts",
@@ -20,7 +25,7 @@
     }
   },
   "scripts": {
-    "build": "pnpm run test && tsc",
+    "build": "pnpm run test && pnpm run typecheck && tsc",
     "dev": "tsc -w",
     "start": "node ./lib/index.js",
     "start:dev": "tsx watch src/index.ts",
@@ -29,24 +34,31 @@
   },
   "keywords": [],
   "dependencies": {
-    "@bililive-tools/manager": "workspace:*",
     "@biliLive-tools/shared": "workspace:*",
     "@biliLive-tools/types": "workspace:*",
+    "@bililive-tools/manager": "workspace:*",
     "@bililive-tools/douyin-recorder": "workspace:*",
     "@koa/bodyparser": "^5.1.1",
     "@koa/cors": "^5.0.0",
+    "@koa/router": "^14.0.0",
     "chokidar": "^3.6.0",
     "cli-progress": "^3.12.0",
     "koa": "^2.15.3",
-    "@koa/router": "^14.0.0",
     "koa-sse-stream": "^0.2.0",
     "multer": "1.4.5-lts.1",
-    "zod": "^3.23.8"
+    "subtitle": "^4.2.1",
+    "ws": "^8.18.0",
+    "zod": "^3.23.8",
+    "@renmu/bili-api": "2.15.2",
+    "check-disk-space": "^3.4.0",
+    "semver": "^7.6.3",
+    "music-segment-detector": "^0.3.1",
+    "awilix": "^11.0.4"
   },
   "devDependencies": {
     "@types/cli-progress": "^3.11.6",
     "@types/koa": "^2.15.0",
-    "@types/koa__router": "^12.0.4",
+    "@types/koa__router": "^12.0.5",
     "tsx": "^4.19.2"
   }
 }

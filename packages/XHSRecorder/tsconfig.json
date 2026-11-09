@@ -1,0 +1,24 @@
+{
+  "compilerOptions": {
+    "target": "es2023",
+    "module": "Node16",
+    "outDir": "./lib",
+    "rootDir": "./src",
+    "strict": false,
+    "sourceMap": false,
+    // "strictNullChecks": true,
+    // "strictPropertyInitialization": false,
+    "moduleResolution": "Node16",
+    "esModuleInterop": true,
+    // "removeComments": false,
+    // "noUnusedParameters": false,
+    // "noUnusedLocals": false,
+    // "noImplicitThis": false,
+    // "noImplicitAny": true,
+    // "noImplicitReturns": false,
+    "skipLibCheck": true,
+    "declaration": true,
+    "types": ["*"]
+  },
+  "include": ["src/**/*.ts"]
+}

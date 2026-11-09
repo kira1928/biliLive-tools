@@ -8,7 +8,10 @@ import {
   countByIntervalInSeconds,
   normalizePoints,
   isBetweenTime,
-  parseSavePath, // 添加导入
+  parseSavePath,
+  isBetweenTimeRange,
+  buildRoomLink,
+  RGB2BGR,
 } from "../../src/utils/index";
 
 export const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -25,6 +28,31 @@ describe("escaped", () => {
     const output = escaped(input);
     expect(output).toEqual("file\\\\:with\\\\:colons.txt");
   });
+});
+
+describe("RGB2BGR", () => {
+  it.each([
+    ["#112233", "#332211"],
+    ["112233", "#332211"],
+    ["#11223344", "#bb332211"],
+    ["#11223300", "#ff332211"],
+    ["#112233FF", "#00332211"],
+  ])("should convert %s to %s", (input, expected) => {
+    expect(RGB2BGR(input)).toBe(expected);
+  });
+
+  it("should preserve alpha when reverseAlpha is false", () => {
+    expect(RGB2BGR("aAbBcCdD", false)).toBe("#dDcCbBaA");
+  });
+
+  it.each(["#12345", "#1234567", "#123456789", "#GGHHII", "rgba(1, 2, 3, 4)"])(
+    "should reject invalid color %s",
+    (input) => {
+      expect(() => RGB2BGR(input)).toThrow(
+        "Invalid color format. Expected hex string like '#RRGGBB' or '#RRGGBBAA'.",
+      );
+    },
+  );
 });
 
 describe.concurrent("getHardwareAcceleration", () => {
@@ -58,6 +86,24 @@ describe.concurrent("getHardwareAcceleration", () => {
     expect(acceleration).toEqual("cpu");
   });
 
+  it("should return 'videotoolbox' for Apple videotoolbox encoders h264_videotoolbox", () => {
+    const encoder = "h264_videotoolbox";
+    const acceleration = getHardwareAcceleration(encoder);
+    expect(acceleration).toEqual("videotoolbox");
+  });
+
+  it("should return 'videotoolbox' for Apple videotoolbox encoders hevc_videotoolbox", () => {
+    const encoder = "hevc_videotoolbox";
+    const acceleration = getHardwareAcceleration(encoder);
+    expect(acceleration).toEqual("videotoolbox");
+  });
+
+  it("should return 'videotoolbox' for Apple videotoolbox encoders av1_videotoolbox", () => {
+    const encoder = "av1_videotoolbox";
+    const acceleration = getHardwareAcceleration(encoder);
+    expect(acceleration).toEqual("videotoolbox");
+  });
+
   it("should throw an error for unknown encoder", () => {
     const encoder = "unknown_encoder";
     expect(() => {
@@ -65,155 +111,60 @@ describe.concurrent("getHardwareAcceleration", () => {
       getHardwareAcceleration(encoder);
     }).toThrowError("未知的编码器: unknown_encoder");
   });
+});
 
-  describe("countByIntervalInSeconds", () => {
-    it("should return an empty array when times array is empty", () => {
-      const times: number[] = [];
-      const interval = 10;
-      const maxTime = 100;
-      const result = countByIntervalInSeconds(times, interval, maxTime);
-      expect(result).toEqual([
-        {
-          start: 0,
-          count: 0,
-        },
-        {
-          start: 10,
-          count: 0,
-        },
-        {
-          start: 20,
-          count: 0,
-        },
-        {
-          start: 30,
-          count: 0,
-        },
-        {
-          start: 40,
-          count: 0,
-        },
-        {
-          start: 50,
-          count: 0,
-        },
-        {
-          start: 60,
-          count: 0,
-        },
-        {
-          start: 70,
-          count: 0,
-        },
-        {
-          start: 80,
-          count: 0,
-        },
-        {
-          start: 90,
-          count: 0,
-        },
-        {
-          start: 100,
-          count: 0,
-        },
-      ]);
-    });
+describe("buildRoomLink", () => {
+  it("should return bilibili live room link", () => {
+    const result = buildRoomLink("bilibili", "123456");
+    expect(result).toBe("https://live.bilibili.com/123456");
+  });
 
-    it("should count times correctly within intervals", () => {
-      const times = [5, 15, 25, 35, 45, 55, 65, 75, 85, 95];
-      const interval = 10;
-      const maxTime = 100;
-      const result = countByIntervalInSeconds(times, interval, maxTime);
-      expect(result).toEqual([
-        { start: 0, count: 1 },
-        { start: 10, count: 1 },
-        { start: 20, count: 1 },
-        { start: 30, count: 1 },
-        { start: 40, count: 1 },
-        { start: 50, count: 1 },
-        { start: 60, count: 1 },
-        { start: 70, count: 1 },
-        { start: 80, count: 1 },
-        { start: 90, count: 1 },
-        { start: 100, count: 0 },
-      ]);
-    });
+  it("should return bilibili live room link for case insensitive platform", () => {
+    const result = buildRoomLink("BILIBILI", "123456");
+    expect(result).toBe("https://live.bilibili.com/123456");
+  });
 
-    it("should handle times that exceed maxTime", () => {
-      const times = [5, 15, 25, 35, 45, 55, 65, 75, 85, 95, 105];
-      const interval = 10;
-      const maxTime = 100;
-      const result = countByIntervalInSeconds(times, interval, maxTime);
-      expect(result).toEqual([
-        { start: 0, count: 1 },
-        { start: 10, count: 1 },
-        { start: 20, count: 1 },
-        { start: 30, count: 1 },
-        { start: 40, count: 1 },
-        { start: 50, count: 1 },
-        { start: 60, count: 1 },
-        { start: 70, count: 1 },
-        { start: 80, count: 1 },
-        { start: 90, count: 1 },
-        { start: 100, count: 0 },
-      ]);
-    });
+  it("should return huya live room link", () => {
+    const result = buildRoomLink("huya", "123456");
+    expect(result).toBe("https://www.huya.com/123456");
+  });
 
-    it("should fill intervals with zero counts if no times fall within them", () => {
-      const times = [25, 45, 65, 85];
-      const interval = 10;
-      const maxTime = 100;
-      const result = countByIntervalInSeconds(times, interval, maxTime);
-      expect(result).toEqual([
-        { start: 0, count: 0 },
-        { start: 10, count: 0 },
-        { start: 20, count: 1 },
-        { start: 30, count: 0 },
-        { start: 40, count: 1 },
-        { start: 50, count: 0 },
-        { start: 60, count: 1 },
-        { start: 70, count: 0 },
-        { start: 80, count: 1 },
-        { start: 90, count: 0 },
-        { start: 100, count: 0 },
-      ]);
-    });
+  it("should return douyu live room link", () => {
+    const result = buildRoomLink("douyu", "123456");
+    expect(result).toBe("https://www.douyu.com/123456");
+  });
 
-    it("should handle times that fall exactly on interval boundaries", () => {
-      const times = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100];
-      const interval = 10;
-      const maxTime = 100;
-      const result = countByIntervalInSeconds(times, interval, maxTime);
-      expect(result).toEqual([
-        { start: 0, count: 0 },
-        { start: 10, count: 1 },
-        { start: 20, count: 1 },
-        { start: 30, count: 1 },
-        { start: 40, count: 1 },
-        { start: 50, count: 1 },
-        { start: 60, count: 1 },
-        { start: 70, count: 1 },
-        { start: 80, count: 1 },
-        { start: 90, count: 1 },
-        { start: 100, count: 0 },
-      ]);
-    });
+  it("should return douyin live room link", () => {
+    const result = buildRoomLink("douyin", "123456");
+    expect(result).toBe("https://live.douyin.com/123456");
+  });
 
-    it("should handle times that with other interval", () => {
-      const times = [10, 20, 30];
-      const interval = 6;
-      const maxTime = 31;
-      const result = countByIntervalInSeconds(times, interval, maxTime);
-      expect(result).toEqual([
-        { start: 0, count: 0 },
-        { start: 6, count: 1 },
-        { start: 12, count: 0 },
-        { start: 18, count: 1 },
-        { start: 24, count: 0 },
-        { start: 30, count: 1 },
-      ]);
-    });
+  it("should return null for unsupported platform", () => {
+    const result = buildRoomLink("unknown", "123456");
+    expect(result).toBe(null);
+  });
+
+  it("should return null for empty platform", () => {
+    const result = buildRoomLink("", "123456");
+    expect(result).toBe(null);
+  });
+
+  it("should handle special characters in roomId", () => {
+    const result = buildRoomLink("bilibili", "test_room-123");
+    expect(result).toBe("https://live.bilibili.com/test_room-123");
+  });
+});
+
+describe("countByIntervalInSeconds", () => {
+  it("should group by 5 seconds and keep empty buckets on boundaries", () => {
+    const result = countByIntervalInSeconds([0, 4.999, 5, 12.3], 5, 15);
+
+    expect(result).toEqual([
+      { start: 0, count: 2 },
+      { start: 5, count: 1 },
+      { start: 10, count: 1 },
+      { start: 15, count: 0 },
+    ]);
   });
 });
 
@@ -383,5 +334,63 @@ describe.concurrent("isBetweenTime", () => {
     const result = isBetweenTime(currentTime, timeRange);
 
     expect(result).toBe(true);
+  });
+});
+
+describe("isBetweenTimeRange", () => {
+  it("should return true when range is undefined", () => {
+    const result = isBetweenTimeRange(undefined);
+    expect(result).toBe(true);
+  });
+
+  it("should return true when range is empty array", () => {
+    const result = isBetweenTimeRange([]);
+    expect(result).toBe(true);
+  });
+
+  it("should return true when range length is not 2", () => {
+    // @ts-ignore
+    const result = isBetweenTimeRange(["10:00:00"]);
+    expect(result).toBe(true);
+  });
+
+  it("should return true when current time is within normal time range", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(2022, 0, 1, 14, 0, 0));
+
+    const result = isBetweenTimeRange(["10:00:00", "18:00:00"]);
+    expect(result).toBe(true);
+
+    vi.useRealTimers();
+  });
+
+  it("should return false when current time is outside normal time range", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(2022, 0, 1, 20, 0, 0));
+
+    const result = isBetweenTimeRange(["10:00:00", "18:00:00"]);
+    expect(result).toBe(false);
+
+    vi.useRealTimers();
+  });
+
+  it("should return true when current time is within overnight time range", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(2022, 0, 1, 2, 0, 0));
+
+    const result = isBetweenTimeRange(["22:00:00", "06:00:00"]);
+    expect(result).toBe(true);
+
+    vi.useRealTimers();
+  });
+
+  it("should return false when current time is outside overnight time range", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(2022, 0, 1, 10, 0, 0));
+
+    const result = isBetweenTimeRange(["22:00:00", "06:00:00"]);
+    expect(result).toBe(false);
+
+    vi.useRealTimers();
   });
 });

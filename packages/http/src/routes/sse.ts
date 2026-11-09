@@ -2,10 +2,12 @@ import fs from "node:fs";
 import Router from "@koa/router";
 import chokidar from "chokidar";
 import sse from "koa-sse-stream";
-import { createRecorderManager } from "@biliLive-tools/shared";
-import { handleListTask, taskQueue } from "@biliLive-tools/shared/task/task.js";
+import { handleListTask } from "@biliLive-tools/shared/task/task.js";
+import { musicDetect } from "@biliLive-tools/shared/musicDetector/index.js";
 
 import { config, container } from "../index.js";
+
+import type { DetectionConfig } from "music-segment-detector";
 
 const router = new Router({
   prefix: "/sse",
@@ -18,7 +20,7 @@ router.get(
   "/streamLogs",
   sse({
     maxClients: 5000,
-    pingInterval: 30000,
+    pingInterval: 60 * 60 * 1000,
   }),
   async (ctx) => {
     const logFilePath = config.logPath;
@@ -60,7 +62,6 @@ router.get(
   },
 );
 
-type createRecorderManagerType = Awaited<ReturnType<typeof createRecorderManager>>;
 /**
  * 获取弹幕流
  */
@@ -73,7 +74,7 @@ router.get(
   async (ctx) => {
     const id = ctx.query.id;
 
-    const recorderManager = container.resolve<createRecorderManagerType>("recorderManager");
+    const recorderManager = container.resolve("recorderManager");
     recorderManager.manager.on("Message", ({ recorder, message }) => {
       if (recorder.id === id) {
         // @ts-ignore
@@ -96,7 +97,7 @@ router.get(
       // @ts-ignore
       ctx.sse.send(JSON.stringify({ num }));
     };
-    const tasks = container.resolve<typeof taskQueue>("taskQueue");
+    const tasks = container.resolve("taskQueue");
     tasks.on("task-start", getRunningTask);
     tasks.on("task-update", getRunningTask);
     tasks.on("task-end", getRunningTask);
@@ -116,6 +117,80 @@ router.get(
       tasks.off("task-cancel", getRunningTask);
     });
     getRunningTask();
+  },
+);
+
+/**
+ * 波形分析进度流
+ */
+router.get(
+  "/analyzerWaveform",
+  sse({
+    maxClients: 100,
+    pingInterval: 30000,
+  }),
+  async (ctx) => {
+    const input = ctx.query.input as string;
+    const configStr = ctx.query.config as string;
+
+    if (!input) {
+      // @ts-ignore
+      ctx.sse.send(JSON.stringify({ type: "error", message: "input is required" }));
+      // @ts-ignore
+      ctx.sse.sendEnd();
+      return;
+    }
+
+    let config: Partial<DetectionConfig> = {};
+    if (configStr) {
+      try {
+        config = JSON.parse(configStr);
+      } catch (e) {
+        // @ts-ignore
+        ctx.sse.send(JSON.stringify({ type: "error", message: "Invalid config JSON" }));
+        // @ts-ignore
+        ctx.sse.sendEnd();
+        return;
+      }
+    }
+
+    // 立即发送初始消息，确保连接已建立
+    // @ts-ignore
+    ctx.sse.send(
+      JSON.stringify({ type: "progress", stage: "init", percentage: 0, message: "初始化..." }),
+    );
+
+    // 不使用 await，让 musicDetect 在后台运行
+    // console.log("开始波形分析，文件:", input);
+    musicDetect(input, config, (progressData) => {
+      // console.log("发送进度:", progressData);
+      // @ts-ignore
+      ctx.sse.send(JSON.stringify({ type: "progress", ...progressData }));
+    })
+      .then((segments) => {
+        // console.log("分析完成，发送结果");
+        // @ts-ignore
+        ctx.sse.send(JSON.stringify({ type: "complete", data: segments }));
+        // @ts-ignore
+        ctx.sse.sendEnd();
+      })
+      .catch((error) => {
+        // console.error("波形分析错误:", error);
+        // @ts-ignore
+        ctx.sse.send(
+          JSON.stringify({
+            type: "error",
+            message: error instanceof Error ? error.message : "分析失败",
+          }),
+        );
+        // @ts-ignore
+        ctx.sse.sendEnd();
+      });
+
+    // 监听客户端断开连接
+    ctx.req.on("close", () => {
+      console.log("Client closed connection - waveform analysis");
+    });
   },
 );
 

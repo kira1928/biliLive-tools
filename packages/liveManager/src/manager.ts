@@ -4,6 +4,7 @@ import ejs from "ejs";
 import { omit, range } from "lodash-es";
 import { parseArgsStringToArgv } from "string-argv";
 import { ChannelId, Message } from "./common.js";
+import { RecorderCache, RecorderCacheImpl, MemoryCacheStore } from "./cache.js";
 import { getBiliStatusInfoByRoomIds } from "./api.js";
 import {
   RecorderCreateOpts,
@@ -12,7 +13,10 @@ import {
   RecordHandle,
   DebugLog,
   Progress,
+  AppendRecorderTimelineArgs,
+  RecorderState,
 } from "./recorder.js";
+import type { XmlStreamStats } from "./xml_stream_controller.js";
 import {
   AnyObject,
   UnknownObject,
@@ -22,9 +26,24 @@ import {
   replaceExtName,
   downloadImage,
   isBetweenTimeRange,
+  sleep,
+  replaceFourByteUnicode,
 } from "./utils.js";
-import { StreamManager } from "./recorder/streamManager.js";
-import { Cache } from "./cache.js";
+import { StreamManager } from "./downloader/streamManager.js";
+
+export interface ProviderCheckConfig {
+  /** 检查循环间隔（毫秒） */
+  autoCheckInterval?: number;
+  /** 最大并发检查线程数 */
+  maxThreadCount?: number;
+  /** 每次检查之间的等待时间（毫秒） */
+  waitTime?: number;
+}
+
+export interface ResolveChannelOptions {
+  /** 解析频道信息时使用的网络代理 */
+  proxy?: string;
+}
 
 export interface RecorderProvider<E extends AnyObject> {
   // Provider 的唯一 id，最好只由英文 + 数字组成
@@ -39,6 +58,7 @@ export interface RecorderProvider<E extends AnyObject> {
   resolveChannelInfoFromURL: (
     this: RecorderProvider<E>,
     channelURL: string,
+    options?: ResolveChannelOptions,
   ) => Promise<{
     id: ChannelId;
     title: string;
@@ -56,13 +76,90 @@ export interface RecorderProvider<E extends AnyObject> {
   setFFMPEGOutputArgs: (this: RecorderProvider<E>, args: string[]) => void;
 }
 
+const RECORDER_TIMELINE_LIMIT = 40;
+const SHORT_RECORDING_THRESHOLD = 12 * 1000;
+const SHORT_RECORDING_RETRY_COUNT = 2;
+const SHORT_RECORDING_REASON_BLACKLIST = new Set([
+  "manual stop",
+  "remove recorder",
+  "直播间标题包含关键词",
+  "标题变更分段",
+]);
+
+interface RecordAttempt {
+  recorderId: string;
+  liveId?: string;
+  startedAt: number;
+}
+
+interface ShortRecordingState {
+  liveId: string;
+  count: number;
+  preferAlternativeStream: boolean;
+}
+
+function normalizeTimelineText(text: string): string {
+  return text.trim();
+}
+
+function appendRecorderTimeline<E extends AnyObject>(
+  recorder: Recorder<E>,
+  args: AppendRecorderTimelineArgs,
+) {
+  const text = normalizeTimelineText(args.text);
+  if (!text) {
+    return recorder.timeline ?? [];
+  }
+
+  const startTime = args.startTime ?? Date.now();
+  const timeline = recorder.timeline ?? [];
+  const lastItem = timeline[timeline.length - 1];
+
+  if (lastItem && lastItem.text === text) {
+    lastItem.endTime = Math.max(lastItem.endTime ?? lastItem.startTime, startTime);
+    recorder.timeline = [...timeline];
+    return recorder.timeline;
+  }
+
+  const nextTimeline = [...timeline, { startTime, text }].slice(-RECORDER_TIMELINE_LIMIT);
+  recorder.timeline = nextTimeline;
+  return nextTimeline;
+}
+
+function ensureRecorderTimeline<E extends AnyObject>(recorder: Recorder<E>) {
+  recorder.timeline = Array.isArray(recorder.timeline) ? recorder.timeline : [];
+  recorder.appendTimeline = (args: AppendRecorderTimelineArgs) =>
+    appendRecorderTimeline(recorder, args);
+}
+
+function getStateTimelineText(state: RecorderState, msg?: string) {
+  const text = normalizeTimelineText(msg ?? "");
+  if (text) {
+    return text;
+  }
+
+  const stateTextMap: Record<RecorderState, string> = {
+    idle: "空闲中",
+    recording: "录制中",
+    "stopping-record": "停止录制中",
+    "check-error": "检查失败",
+    "title-blocked": "标题命中过滤规则",
+    "charge-skipped": "特殊直播(付费/权限/加密)，无法录制，已跳过",
+  };
+
+  return stateTextMap[state];
+}
+
 const configurableProps = [
   "savePathRule",
   "autoRemoveSystemReservedChars",
   "autoCheckInterval",
+  "maxThreadCount",
+  "waitTime",
   "ffmpegOutputArgs",
   "biliBatchQuery",
   "recordRetryImmediately",
+  "providerCheckConfig",
 ] as const;
 type ConfigurableProp = (typeof configurableProps)[number];
 function isConfigurableProp(prop: unknown): prop is ConfigurableProp {
@@ -78,10 +175,21 @@ export interface RecorderManager<
     error: { source: string; err: unknown };
     RecordStart: { recorder: SerializedRecorder<E>; recordHandle: RecordHandle };
     RecordSegment: { recorder: SerializedRecorder<E>; recordHandle?: RecordHandle };
-    videoFileCreated: { recorder: SerializedRecorder<E>; filename: string; cover?: string };
-    videoFileCompleted: { recorder: SerializedRecorder<E>; filename: string };
+    videoFileCreated: {
+      recorder: SerializedRecorder<E>;
+      filename: string;
+      cover?: string;
+      rawFilename?: string;
+    };
+    videoFileCompleted: {
+      recorder: SerializedRecorder<E>;
+      filename: string;
+      stats?: XmlStreamStats;
+    };
     RecorderProgress: { recorder: SerializedRecorder<E>; progress: Progress };
     RecoderLiveStart: { recorder: Recorder<E> };
+    // 检测到充电直播(付费/DRM 加密直播)
+    RecoderChargeLive: { recorder: Recorder<E> };
 
     RecordStop: { recorder: SerializedRecorder<E>; recordHandle: RecordHandle; reason?: string };
     Message: { recorder: SerializedRecorder<E>; message: Message };
@@ -101,19 +209,22 @@ export interface RecorderManager<
   ) => P[];
 
   recorders: Recorder<E>[];
-  addRecorder: (
-    this: RecorderManager<ME, P, PE, E>,
-    opts: Omit<RecorderCreateOpts<E>, "cache">,
-  ) => Recorder<E>;
+  addRecorder: (this: RecorderManager<ME, P, PE, E>, opts: RecorderCreateOpts<E>) => Recorder<E>;
   removeRecorder: (this: RecorderManager<ME, P, PE, E>, recorder: Recorder<E>) => void;
+  getRecorder: (this: RecorderManager<ME, P, PE, E>, id: string) => Recorder<E> | null;
   startRecord: (
     this: RecorderManager<ME, P, PE, E>,
     id: string,
+    opts?: {
+      ignoreDataLimit?: boolean;
+    },
   ) => Promise<Recorder<E> | undefined>;
   stopRecord: (this: RecorderManager<ME, P, PE, E>, id: string) => Promise<Recorder<E> | undefined>;
   cutRecord: (this: RecorderManager<ME, P, PE, E>, id: string) => Promise<Recorder<E> | undefined>;
 
   autoCheckInterval: number;
+  maxThreadCount: number;
+  waitTime: number;
   isCheckLoopRunning: boolean;
   startCheckLoop: (this: RecorderManager<ME, P, PE, E>) => void;
   stopCheckLoop: (this: RecorderManager<ME, P, PE, E>) => void;
@@ -123,11 +234,17 @@ export interface RecorderManager<
   ffmpegOutputArgs: string;
   /** b站使用批量查询接口 */
   biliBatchQuery: boolean;
-  /** 测试：录制错误立即重试 */
+  /** 下播延迟检查 */
   recordRetryImmediately: boolean;
-
-  /** 缓存实例 */
-  cache: Cache;
+  /** 缓存系统 */
+  cache: RecorderCache;
+  /** 每个 provider 的检查配置 */
+  providerCheckConfig: Record<string, ProviderCheckConfig>;
+  /** 获取指定 provider 的检查配置（自动 fallback 到全局配置） */
+  getProviderCheckConfig: (
+    this: RecorderManager<ME, P, PE, E>,
+    providerId: string,
+  ) => Required<ProviderCheckConfig>;
 }
 
 export type RecorderManagerCreateOpts<
@@ -137,6 +254,10 @@ export type RecorderManagerCreateOpts<
   E extends AnyObject = ME & PE,
 > = Partial<Pick<RecorderManager<ME, P, PE, E>, ConfigurableProp>> & {
   providers: P[];
+  /** 自定义缓存实现，不提供则使用默认的内存缓存 */
+  cache?: RecorderCache;
+  /** 每个 provider 的检查配置，key 为 provider.id */
+  providerCheckConfig?: Record<string, ProviderCheckConfig>;
 };
 
 export function createRecorderManager<
@@ -147,9 +268,28 @@ export function createRecorderManager<
 >(opts: RecorderManagerCreateOpts<ME, P, PE, E>): RecorderManager<ME, P, PE, E> {
   const recorders: Recorder<E>[] = [];
 
-  let checkLoopTimer: NodeJS.Timeout | undefined;
+  // 短录制检测仅用于当前进程，不需要持久化。
+  const recordAttempts = new Map<string, RecordAttempt>();
+  const shortRecordingStates = new Map<string, ShortRecordingState>();
 
-  const multiThreadCheck = async (manager: RecorderManager<ME, P, PE, E>) => {
+  const getStreamRetryHint = (recorder: Recorder<E>) => {
+    const state = shortRecordingStates.get(recorder.id);
+    if (!state?.preferAlternativeStream) return undefined;
+
+    return {
+      liveId: state.liveId,
+      preferAlternativeStream: true,
+    } as const;
+  };
+
+  // 存储每个 provider 的 timer，key 为 providerId
+  const checkLoopTimers = new Map<string, NodeJS.Timeout>();
+
+  const multiThreadCheck = async (
+    manager: RecorderManager<ME, P, PE, E>,
+    providerId: string,
+    providerConfig: Required<ProviderCheckConfig>,
+  ) => {
     const handleBatchQuery = async (obj: Record<string, boolean>) => {
       for (const recorder of recorders
         .filter((r) => !r.disableAutoCheck)
@@ -162,24 +302,24 @@ export function createRecorderManager<
               return genSavePathFromRule(manager, recorder, data);
             },
             banLiveId: tempBanObj[recorder.channelId],
+            streamRetryHint: getStreamRetryHint(recorder),
           });
         }
       }
     };
 
-    const maxThreadCount = 3;
     // 这里暂时不打算用 state == recording 来过滤，provider 必须内部自己处理录制过程中的 check，
     // 这样可以防止一些意外调用 checkLiveStatusAndRecord 时出现重复录制。
-    let needCheckRecorders = recorders
+    const needCheckRecorders = recorders
       .filter((r) => !r.disableAutoCheck)
-      .filter((r) => isBetweenTimeRange(r.handleTime));
-    let threads: Promise<void>[] = [];
+      .filter((r) => isBetweenTimeRange(r.handleTime))
+      .filter((r) => r.providerId === providerId);
+    const threads: Promise<void>[] = [];
 
-    if (manager.biliBatchQuery) {
-      const biliNeedCheckRecorders = needCheckRecorders
-        .filter((r) => r.providerId === "Bilibili")
-        .filter((r) => r.recordHandle == null);
-      needCheckRecorders = needCheckRecorders.filter((r) => r.providerId !== "Bilibili");
+    // Bilibili 批量查询特殊处理
+    if (providerId === "Bilibili" && manager.biliBatchQuery) {
+      const biliNeedCheckRecorders = needCheckRecorders.filter((r) => r.recordHandle == null);
+      // const biliRecordingRecorders = needCheckRecorders.filter((r) => r.recordHandle != null);
 
       const roomIds = biliNeedCheckRecorders.map((r) => r.channelId).map(Number);
       try {
@@ -190,10 +330,15 @@ export function createRecorderManager<
       } catch (err) {
         manager.emit("error", { source: "getBiliStatusInfoByRoomIds", err });
         // 如果批量查询失败，则使用单个查询
-        needCheckRecorders = needCheckRecorders.concat(biliNeedCheckRecorders);
+        needCheckRecorders.push(...biliNeedCheckRecorders);
       }
+
+      // 正在录制的也需要检查（放回队列）
+      // needCheckRecorders.length = 0;
+      // needCheckRecorders.push(...biliRecordingRecorders);
     }
 
+    // 为当前 provider 创建线程池
     const checkOnce = async () => {
       const recorder = needCheckRecorders.shift();
       if (recorder == null) return;
@@ -204,16 +349,21 @@ export function createRecorderManager<
           return genSavePathFromRule(manager, recorder, data);
         },
         banLiveId,
+        streamRetryHint: getStreamRetryHint(recorder),
       });
     };
 
-    threads = threads.concat(
-      range(0, maxThreadCount).map(async () => {
+    threads.push(
+      ...range(0, providerConfig.maxThreadCount).map(async () => {
         while (needCheckRecorders.length > 0) {
           try {
             await checkOnce();
           } catch (err) {
             manager.emit("error", { source: "checkOnceInThread", err });
+          } finally {
+            if (providerConfig.waitTime > 0) {
+              await sleep(providerConfig.waitTime);
+            }
           }
         }
       }),
@@ -228,11 +378,11 @@ export function createRecorderManager<
   // 用于是否触发LiveStart事件，不要重复触发
   const liveStartObj: Record<string, boolean> = {};
 
+  // 用于是否触发ChargeLive(充电直播)事件，按场次去重，不要每个检查周期重复触发
+  const chargeLiveObj: Record<string, boolean> = {};
+
   // 用于记录触发重试直播场次的次数
   const retryCountObj: Record<string, number> = {};
-
-  // 获取缓存单例
-  const cache = Cache.getInstance();
 
   const manager: RecorderManager<ME, P, PE, E> = {
     // @ts-ignore
@@ -252,26 +402,59 @@ export function createRecorderManager<
       // provider.createRecorder 能返回 Recorder<PE> 才能进一步优化。
       const recorder = provider.createRecorder({
         ...omit(opts, ["providerId"]),
-        cache,
+        // cache,
       }) as Recorder<E>;
+
+      // 为录制器注入独立的缓存命名空间
+      recorder.cache = this.cache.createNamespace(recorder.id);
+      ensureRecorderTimeline(recorder);
+
       this.recorders.push(recorder);
 
-      recorder.on("RecordStart", (recordHandle) =>
-        this.emit("RecordStart", { recorder: recorder.toJSON(), recordHandle }),
-      );
+      recorder.on("RecordStart", (recordHandle) => {
+        const liveId = recorder.liveInfo?.liveId;
+        recordAttempts.set(recordHandle.id, {
+          recorderId: recorder.id,
+          liveId,
+          startedAt: Date.now(),
+        });
+
+        const shortRecordingState = shortRecordingStates.get(recorder.id);
+        if (shortRecordingState) {
+          if (shortRecordingState.liveId === liveId) {
+            shortRecordingState.preferAlternativeStream = false;
+          } else {
+            shortRecordingStates.delete(recorder.id);
+          }
+        }
+
+        recorder.appendTimeline?.({
+          startTime: recorder.liveInfo?.recordStartTime?.getTime() ?? Date.now(),
+          text: `开始录制：${recordHandle.stream}/${recordHandle.source}/${recordHandle.recorderType}/${recordHandle.url}`,
+        });
+        this.emit("RecordStart", { recorder: recorder.toJSON(), recordHandle });
+      });
       recorder.on("RecordSegment", (recordHandle) =>
         this.emit("RecordSegment", { recorder: recorder.toJSON(), recordHandle }),
       );
-      recorder.on("videoFileCreated", ({ filename, cover }) => {
+      recorder.on("videoFileCreated", ({ filename, cover, rawFilename }) => {
         if (recorder.saveCover && recorder?.liveInfo?.cover) {
           const coverPath = replaceExtName(filename, ".jpg");
           downloadImage(cover ?? recorder?.liveInfo?.cover, coverPath);
         }
-        this.emit("videoFileCreated", { recorder: recorder.toJSON(), filename });
+        recorder.appendTimeline?.({
+          startTime: Date.now(),
+          text: `视频文件创建：${filename}`,
+        });
+        this.emit("videoFileCreated", { recorder: recorder.toJSON(), filename, rawFilename });
       });
-      recorder.on("videoFileCompleted", ({ filename }) =>
-        this.emit("videoFileCompleted", { recorder: recorder.toJSON(), filename }),
-      );
+      recorder.on("videoFileCompleted", ({ filename, stats }) => {
+        recorder.appendTimeline?.({
+          startTime: Date.now(),
+          text: `视频文件创建完成：${filename}`,
+        });
+        this.emit("videoFileCompleted", { recorder: recorder.toJSON(), filename, stats });
+      });
       recorder.on("Message", (message) =>
         this.emit("Message", { recorder: recorder.toJSON(), message }),
       );
@@ -282,32 +465,72 @@ export function createRecorderManager<
         this.emit("RecorderDebugLog", { recorder: recorder, ...log }),
       );
       recorder.on("RecordStop", ({ recordHandle, reason }) => {
+        const stoppedAt = Date.now();
+        recorder.appendTimeline?.({
+          startTime: stoppedAt,
+          text: reason ? `停止录制：${reason}` : "停止录制",
+        });
+
+        const attempt = recordAttempts.get(recordHandle.id);
+        recordAttempts.delete(recordHandle.id);
+        if (attempt?.recorderId === recorder.id && attempt.liveId) {
+          const isReasonBlacklisted =
+            reason != null && SHORT_RECORDING_REASON_BLACKLIST.has(reason);
+          const duration = stoppedAt - attempt.startedAt;
+          const previousState = shortRecordingStates.get(recorder.id);
+
+          if (isReasonBlacklisted || duration >= SHORT_RECORDING_THRESHOLD) {
+            shortRecordingStates.delete(recorder.id);
+          } else {
+            const count = previousState?.liveId === attempt.liveId ? previousState.count + 1 : 1;
+            const preferAlternativeStream = count >= SHORT_RECORDING_RETRY_COUNT;
+            shortRecordingStates.set(recorder.id, {
+              liveId: attempt.liveId,
+              count,
+              preferAlternativeStream,
+            });
+
+            if (preferAlternativeStream && !previousState?.preferAlternativeStream) {
+              recorder.appendTimeline?.({
+                startTime: stoppedAt,
+                text: `连续 ${SHORT_RECORDING_RETRY_COUNT} 次录制在 ${SHORT_RECORDING_THRESHOLD / 1000} 秒内结束，下次可能尝试切换流格式（仅抖音）`,
+              });
+            }
+          }
+        }
+
         this.emit("RecordStop", { recorder: recorder.toJSON(), recordHandle, reason });
-        // 如果reason中存在"invalid stream"，说明直播由于某些原因中断了，虽然会在下一次周期检查中继续，但是会遗漏一段时间。
-        // 这时候可以触发一次检查，但出于直播可能抽风的原因，为避免风控，一场直播最多触发五次。
-        // 测试阶段，还需要一个开关，默认关闭，几个版本后转正使用
+        const maxRetryCount = 10;
+        // 默认策略下，如果录制被中断，那么会在下一个检查周期时重新检查直播状态并重新开始录制，这种策略的问题就是一部分时间会被漏掉。
+        // 如果开启了该选项，且录制开始时间与结束时间相差在一分钟以上（某些平台下播会扔会有重复流），那么会立即进行一次检查。
         // 也许之后还能链接复用，但也会引入更多复杂度，需要谨慎考虑
         // 虎牙直播结束后可能额外触发导致错误，忽略虎牙直播间：https://www.huya.com/910323
         if (
           manager.recordRetryImmediately &&
-          recorder.providerId !== "HuYa" &&
-          reason &&
-          reason.includes("invalid stream") &&
-          recorder?.liveInfo?.liveId
+          recorder?.liveInfo?.liveId &&
+          reason !== "manual stop"
         ) {
           const key = `${recorder.channelId}-${recorder.liveInfo?.liveId}`;
+          const recordStartTime = recorder.liveInfo?.recordStartTime.getTime() ?? 0;
+          const recordStopTime = Date.now();
+          // 录制时间差在一分钟以上
+          if (recordStopTime - recordStartTime < 60 * 1000) return;
 
-          if (retryCountObj[key] > 5) return;
+          if (retryCountObj[key] > maxRetryCount) return;
           if (!retryCountObj[key]) {
             retryCountObj[key] = 0;
           }
-          if (retryCountObj[key] < 5) {
+          if (retryCountObj[key] < maxRetryCount) {
             retryCountObj[key]++;
           }
           this.emit("RecorderDebugLog", {
             recorder,
             type: "common",
-            text: `录制${recorder?.channelId}因“${reason}”中断，触发重试直播（${retryCountObj[key]}）`,
+            text: `录制${recorder.channelId}中断，立即触发重试（${retryCountObj[key]}/${maxRetryCount}）`,
+          });
+          recorder.appendTimeline?.({
+            startTime: Date.now(),
+            text: `录制中断，立即触发重试（${retryCountObj[key]}/${maxRetryCount}）`,
           });
           // 触发一次检查，等待一秒使状态清理完毕
           setTimeout(() => {
@@ -315,6 +538,7 @@ export function createRecorderManager<
               getSavePath(data) {
                 return genSavePathFromRule(manager, recorder, data);
               },
+              streamRetryHint: getStreamRetryHint(recorder),
             });
           }, 1000);
         }
@@ -331,8 +555,27 @@ export function createRecorderManager<
 
         this.emit("RecoderLiveStart", { recorder: recorder });
       });
+      recorder.on("ChargeLive", () => {
+        // 充电直播按场次去重，避免每个检查周期重复推送
+        const liveId = recorder.liveInfo?.liveId;
+        const key = `${recorder.channelId}-${liveId ?? ""}`;
+        if (chargeLiveObj[key]) return;
+        chargeLiveObj[key] = true;
 
+        this.emit("RecoderChargeLive", { recorder: recorder });
+      });
+      recorder.on("stateChange", ({ state, msg }) => {
+        recorder.state = state;
+        if (state !== "idle") {
+          recorder.appendTimeline?.({
+            startTime: Date.now(),
+            text: `状态变更：${getStateTimelineText(state, msg)}`,
+          });
+        }
+      });
       this.emit("RecorderAdded", recorder.toJSON());
+
+      // startCheckLoop 会为所有注册的 provider 启动检查循环，无需在此处额外处理
 
       return recorder;
     },
@@ -343,18 +586,38 @@ export function createRecorderManager<
       this.recorders.splice(idx, 1);
 
       delete tempBanObj[recorder.channelId];
+      // 清理该房间的 liveStart/chargeLive 去重标记，否则删除后重新添加同一场直播不会再次推送通知
+      const keyPrefix = `${recorder.channelId}-`;
+      Object.keys(liveStartObj).forEach((k) => {
+        if (k.startsWith(keyPrefix)) delete liveStartObj[k];
+      });
+      Object.keys(chargeLiveObj).forEach((k) => {
+        if (k.startsWith(keyPrefix)) delete chargeLiveObj[k];
+      });
+      shortRecordingStates.delete(recorder.id);
+      for (const [recordHandleId, attempt] of recordAttempts) {
+        if (attempt.recorderId === recorder.id) recordAttempts.delete(recordHandleId);
+      }
       this.emit("RecorderRemoved", recorder.toJSON());
     },
-    async startRecord(id: string) {
+    getRecorder(id) {
+      const recorder = this.recorders.find((item) => item.id === id);
+      return recorder ?? null;
+    },
+    async startRecord(id: string, iOpts = {}) {
+      const { ignoreDataLimit = true } = iOpts;
       const recorder = this.recorders.find((item) => item.id === id);
       if (recorder == null) return;
       if (recorder.recordHandle != null) return;
+      // 如果手动开启且需要判断限制时间，再时间限制内时，就不启动录制
+      if (!ignoreDataLimit && isBetweenTimeRange(recorder.handleTime)) return;
 
       await recorder.checkLiveStatusAndRecord({
         getSavePath(data) {
           return genSavePathFromRule(manager, recorder, data);
         },
         isManualStart: true,
+        streamRetryHint: getStreamRetryHint(recorder),
       });
       delete tempBanObj[recorder.channelId];
       recorder.tempStopIntervalCheck = false;
@@ -366,7 +629,7 @@ export function createRecorderManager<
       if (recorder.recordHandle == null) return;
       const liveId = recorder.liveInfo?.liveId;
 
-      await recorder.recordHandle.stop("manual stop", true);
+      await recorder.recordHandle.stop("manual stop");
       if (liveId) {
         tempBanObj[recorder.channelId] = liveId;
         recorder.tempStopIntervalCheck = true;
@@ -381,34 +644,60 @@ export function createRecorderManager<
       return recorder;
     },
 
-    autoCheckInterval: opts.autoCheckInterval ?? 1000,
+    autoCheckInterval: opts.autoCheckInterval ?? 60000,
+    maxThreadCount: opts.maxThreadCount ?? 3,
+    waitTime: opts.waitTime ?? 0,
     isCheckLoopRunning: false,
     startCheckLoop() {
       if (this.isCheckLoopRunning) return;
       this.isCheckLoopRunning = true;
       // TODO: emit updated event
 
-      const checkLoop = async () => {
-        try {
-          await multiThreadCheck(this);
-        } catch (err) {
-          this.emit("error", { source: "multiThreadCheck", err });
-        } finally {
-          if (!this.isCheckLoopRunning) {
-            // do nothing
-          } else {
-            checkLoopTimer = setTimeout(checkLoop, this.autoCheckInterval);
+      // 为每个 provider 创建独立的检查循环
+      const startProviderCheckLoop = (providerId: string) => {
+        const checkLoop = async () => {
+          const providerConfig = this.getProviderCheckConfig(providerId);
+
+          try {
+            // 只检查当前 provider 的 recorders
+            await multiThreadCheck(this, providerId, providerConfig);
+          } catch (err) {
+            this.emit("error", { source: "multiThreadCheck", err });
+          } finally {
+            if (!this.isCheckLoopRunning) {
+              // 停止了，清理 timer
+              const timer = checkLoopTimers.get(providerId);
+              if (timer) {
+                clearTimeout(timer);
+                checkLoopTimers.delete(providerId);
+              }
+            } else {
+              // 即使当前 provider 暂时没有 recorder，也保留轮询，避免后续新增 recorder 时漏掉自动检查。
+              const timer = setTimeout(checkLoop, providerConfig.autoCheckInterval);
+              checkLoopTimers.set(providerId, timer);
+            }
           }
-        }
+        };
+
+        void checkLoop();
       };
 
-      void checkLoop();
+      // 直接从注册的 provider 获取所有 provider IDs
+      const providerIds = this.providers.map((p) => p.id);
+      for (const providerId of providerIds) {
+        startProviderCheckLoop(providerId);
+      }
     },
     stopCheckLoop() {
       if (!this.isCheckLoopRunning) return;
       this.isCheckLoopRunning = false;
       // TODO: emit updated event
-      clearTimeout(checkLoopTimer);
+
+      // 清理所有 provider 的 timer
+      for (const timer of checkLoopTimers.values()) {
+        clearTimeout(timer);
+      }
+      checkLoopTimers.clear();
     },
 
     savePathRule:
@@ -422,6 +711,19 @@ export function createRecorderManager<
     biliBatchQuery: opts.biliBatchQuery ?? false,
     recordRetryImmediately: opts.recordRetryImmediately ?? false,
 
+    cache: opts.cache ?? new RecorderCacheImpl(new MemoryCacheStore()),
+
+    providerCheckConfig: opts.providerCheckConfig ?? {},
+
+    getProviderCheckConfig(providerId: string) {
+      const providerConfig = this.providerCheckConfig[providerId];
+      return {
+        autoCheckInterval: providerConfig?.autoCheckInterval ?? this.autoCheckInterval,
+        maxThreadCount: providerConfig?.maxThreadCount ?? this.maxThreadCount,
+        waitTime: providerConfig?.waitTime ?? this.waitTime,
+      };
+    },
+
     ffmpegOutputArgs:
       opts.ffmpegOutputArgs ??
       "-c copy" +
@@ -430,19 +732,7 @@ export function createRecorderManager<
          * 最后一个片段，而 FLV 格式如果录制中 KILL 了需要手动修复下 keyframes。所以默认使用 fmp4 格式。
          */
         " -movflags faststart+frag_keyframe+empty_moov" +
-        /**
-         * 浏览器加载 FragmentMP4 会需要先把它所有的 moof boxes 都加载完成后才能播放，
-         * 默认的分段时长很小，会产生大量的 moof，导致加载很慢，所以这里设置一个分段的最小时长。
-         *
-         * TODO: 这个浏览器行为或许是可以优化的，比如试试给 fmp4 在录制完成后设置或者录制过程中实时更新 mvhd.duration。
-         * https://stackoverflow.com/questions/55887980/how-to-use-media-source-extension-mse-low-latency-mode
-         * https://stackoverflow.com/questions/61803136/ffmpeg-fragmented-mp4-takes-long-time-to-start-playing-on-chrome
-         *
-         * TODO: 如果浏览器行为无法优化，并且想进一步优化加载速度，可以考虑录制时使用 fmp4，录制完成后再转一次普通 mp4。
-         */
         " -min_frag_duration 10000000",
-
-    cache,
   };
 
   const setProvidersFFMPEGOutputArgs = (ffmpegOutputArgs: string) => {
@@ -481,43 +771,50 @@ export function genSavePathFromRule<
   extData: {
     owner: string;
     title: string;
-    startTime?: number;
+    startTime: number;
+    liveStartTime: Date;
+    recordStartTime: Date;
+    // 如果存在这个参数，那么会在生成路径时补充毫秒时间戳，避免生成重复文件名造成覆盖
+    extraMs?: boolean;
   },
 ): string {
   // TODO: 这里随便写的，后面再优化
   const provider = manager.providers.find((p) => p.id === recorder.toJSON().providerId);
 
   const now = extData?.startTime ? new Date(extData.startTime) : new Date();
-  const owner = (extData?.owner ?? "").replaceAll("%", "_");
-  const title = (extData?.title ?? "").replaceAll("%", "_");
+  const owner = removeSystemReservedChars((extData?.owner ?? "").replaceAll("%", "_"));
+  const title = removeSystemReservedChars((extData?.title ?? "").replaceAll("%", "_"));
+  const remarks = removeSystemReservedChars((recorder.remarks ?? "").replaceAll("%", "_"));
+  const channelId = removeSystemReservedChars(String(recorder.channelId));
   const params = {
     platform: provider?.name ?? "unknown",
-    channelId: recorder.channelId,
-    remarks: recorder.remarks ?? "",
     year: formatDate(now, "yyyy"),
     month: formatDate(now, "MM"),
     date: formatDate(now, "dd"),
     hour: formatDate(now, "HH"),
     min: formatDate(now, "mm"),
     sec: formatDate(now, "ss"),
+    ms: formatDate(now, "SSS"),
     ...extData,
+    startTime: now,
     owner: owner,
     title: title,
+    remarks: remarks,
+    channelId,
+    replaceFourByteUnicode,
   };
-  if (manager.autoRemoveSystemReservedChars) {
-    for (const key in params) {
-      params[key] = removeSystemReservedChars(String(params[key])).trim();
-    }
-  }
 
   let savePathRule = manager.savePathRule;
+  if (extData?.extraMs) {
+    savePathRule += "_{ms}";
+  }
   try {
     savePathRule = ejs.render(savePathRule, params);
   } catch (error) {
-    console.error("模板解析错误", error);
+    console.error("模板解析错误", error, savePathRule, params);
   }
   return formatTemplate(savePathRule, params);
 }
 
 export type GetProviderExtra<P> = P extends RecorderProvider<infer E> ? E : never;
-export { StreamManager, Cache };
+export { StreamManager };

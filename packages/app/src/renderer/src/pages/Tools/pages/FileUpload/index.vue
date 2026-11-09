@@ -12,7 +12,13 @@
         审核通过后移除源文件
       </n-checkbox>
     </div>
-    <FileSelect ref="fileSelect" v-model="fileList" @change="fileChange"></FileSelect>
+    <FileSelect
+      ref="fileSelect"
+      v-model="fileList"
+      @change="fileChange"
+      inputPlaceholder="输入内容将会被用为分P标题"
+      :filename-clean="false"
+    ></FileSelect>
 
     <n-divider />
     <div class="" style="margin-top: 30px">
@@ -51,7 +57,9 @@ defineOptions({
 
 const { userInfo } = storeToRefs(useUserInfoStore());
 const { handlePresetOptions, presetOptions } = useBili();
-const { appConfig } = storeToRefs(useAppConfig());
+const appConfigStore = useAppConfig();
+const { appConfig } = storeToRefs(appConfigStore);
+
 const notice = useNotification();
 
 const options = toReactive(
@@ -69,6 +77,7 @@ const fileList = ref<
     title: string;
     path: string;
     visible: boolean;
+    ext?: string;
   }[]
 >([]);
 
@@ -101,15 +110,15 @@ const upload = async () => {
     });
     return;
   }
-  await biliApi.validUploadParams(deepRaw(presetOptions.value.config));
-  notice.info({
-    title: `开始上传`,
-    duration: 1000,
-  });
+  const uploadConfig = deepRaw(presetOptions.value.config) as typeof presetOptions.value.config;
+  await biliApi.validUploadParams(uploadConfig);
+
+  // 后端会处理标题格式化、转载来源等逻辑
+  const videos = deepRaw(fileList.value);
   await biliApi.upload({
     uid: userInfo.value.uid!,
-    videos: deepRaw(fileList.value),
-    config: deepRaw(presetOptions.value.config),
+    videos,
+    config: uploadConfig,
     options: {
       removeOriginAfterUploadCheck: options.removeOriginAfterUploadCheck,
     },
@@ -145,12 +154,17 @@ const appendVideo = async () => {
     title: `开始上传`,
     duration: 1000,
   });
+
+  const uploadConfig = deepRaw(presetOptions.value.config);
+  const videos = deepRaw(fileList.value);
+
+  // 后端会处理分P标题格式化等逻辑
   await biliApi.upload({
     uid: userInfo.value.uid!,
     vid: Number(aid.value),
-    videos: deepRaw(fileList.value),
+    videos,
     config: {
-      ...deepRaw(presetOptions.value.config),
+      ...uploadConfig,
     },
     options: {
       removeOriginAfterUploadCheck: options.removeOriginAfterUploadCheck,
@@ -180,9 +194,11 @@ const fileChange = (files: any) => {
 
   const name = files[0].title;
   if (biliSettingRef.value?.getTitle() === name) return;
-  const data = JSON.parse(localStorage.getItem("notShowAgain") || "{}");
-  if (data["bili-upload-title"] === true) return;
-
+  if (appConfig.value.biliUploadFileNameType === "never") return;
+  if (appConfig.value.biliUploadFileNameType === "always") {
+    biliSettingRef.value?.setTitle(name);
+    return;
+  }
   hasNotice.value = true;
   const n = notification.create({
     title: `是否将文件名改为视频标题？`,
@@ -215,8 +231,7 @@ const fileChange = (files: any) => {
                 text: true,
                 type: "error",
                 onClick: () => {
-                  data["bili-upload-title"] = true;
-                  localStorage.setItem("notShowAgain", JSON.stringify(data));
+                  appConfigStore.set("biliUploadFileNameType", "never");
                   n.destroy();
                 },
               },

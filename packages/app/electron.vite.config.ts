@@ -13,9 +13,14 @@ export default defineConfig({
   main: {
     plugins: [
       externalizeDepsPlugin({
-        exclude: ["@biliLive-tools/shared", "@biliLive-tools/http"],
+        exclude: [],
       }),
     ],
+    build: {
+      rollupOptions: {
+        external: ["fsevents"],
+      },
+    },
   },
   preload: {
     plugins: [externalizeDepsPlugin()],
@@ -23,6 +28,7 @@ export default defineConfig({
   renderer: {
     server: {
       port: 28080,
+      host: "0.0.0.0",
     },
     resolve: {
       alias: {

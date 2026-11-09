@@ -13,45 +13,67 @@ import {
   net,
   nativeTheme,
   crashReporter,
+  nativeImage,
+  powerSaveBlocker,
 } from "electron";
 import { createContainer } from "awilix";
 
-import installExtension from "electron-devtools-installer";
+import { installExtension } from "electron-devtools-installer";
 import { electronApp, optimizer, is } from "@electron-toolkit/utils";
 
 import log from "./utils/log";
 import { notify } from "./utils/index";
-import { init, createRecorderManager } from "@biliLive-tools/shared";
+import { PowerSaveController } from "./utils/powerSave";
+import { FileDialogHistory, type FileDialogPaths } from "./utils/fileDialogHistory";
+import { init } from "@biliLive-tools/shared";
 import { serverStart } from "@biliLive-tools/http";
 
 import { cookieHandlers } from "./cookie";
 import { commonHandlers } from "./common";
 import { configHandlers, ffmpegHandlers } from "./handlers";
 // import icon from "../../resources/icon.png?asset";
-import {
-  FFMPEG_PATH,
-  FFPROBE_PATH,
-  DANMUKUFACTORY_PATH,
-  LOG_PATH,
-  MESIO_PATH,
-  __dirname2,
-  getConfigPath,
-} from "./appConstant";
+import { __dirname2, getConfigPath } from "./appConstant";
 
 import type { OpenDialogOptions } from "../types";
 import type { IpcMainInvokeEvent, IpcMain, SaveDialogOptions } from "electron";
 import type { Theme, GlobalConfig } from "@biliLive-tools/types";
-// import type { AwilixContainer } from "awilix";
-import type { AppConfig, TaskQueue } from "@biliLive-tools/shared";
 
 export let mainWin: BrowserWindow;
 export let container = createContainer();
+const powerSaveController = new PowerSaveController(powerSaveBlocker);
+const fileDialogHistory = new FileDialogHistory(
+  new Store<FileDialogPaths>({ name: "file-dialog-state" }),
+);
+
+const SENTRY_CRASH_DSN =
+  "https://aa05399bf7cf8b619177be3284d28fc8@o4511547045576704.ingest.us.sentry.io/4511547052720128";
+
+const getSentryMinidumpSubmitURL = (dsn: string) => {
+  try {
+    const url = new URL(dsn);
+    const projectId = url.pathname.replace(/^\/+/, "");
+    if (!projectId || !url.username) {
+      throw new Error("Missing Sentry project id or public key.");
+    }
+
+    return `${url.protocol}//${url.host}/api/${projectId}/minidump/?sentry_key=${url.username}`;
+  } catch (error) {
+    log.warn("Failed to parse Sentry crash DSN.", error);
+    return undefined;
+  }
+};
+
+// 避免多个窗口的 SSE 长连接占满本地 HTTP 服务的连接池。
+app.commandLine.appendSwitch("ignore-connections-limit", "127.0.0.1");
 
 contextMenu({
   showSelectAll: false,
   showSearchWithGoogle: false,
   showSaveImageAs: false,
 });
+if (process.argv.includes("--disable-gpu")) {
+  app.disableHardwareAcceleration();
+}
 
 const WindowState = new Store<{
   winBounds: {
@@ -65,10 +87,18 @@ const WindowState = new Store<{
   name: "window-state",
 });
 
-const windowConfig = {
+const windowConfig: {
+  width: number;
+  height: number;
+  isMaximized: boolean;
+  x: number | undefined;
+  y: number | undefined;
+} = {
   width: 900,
   height: 750,
   isMaximized: false,
+  x: undefined,
+  y: undefined,
 };
 
 const registerHandlers = (
@@ -90,6 +120,8 @@ const genHandler = (ipcMain: IpcMain) => {
   ipcMain.handle("common:relaunch", relaunch);
   ipcMain.handle("common:setOpenAtLogin", setOpenAtLogin);
   ipcMain.handle("common:setTheme", setTheme);
+  ipcMain.handle("common:setMenuBarVisible", setMenuBarVisible);
+  ipcMain.handle("common:createSubWindow", (_event, options) => createSubWindow(options));
   ipcMain.handle("common:checkUpdate", manualCheckUpdate);
 
   registerHandlers(ipcMain, ffmpegHandlers);
@@ -98,8 +130,70 @@ const genHandler = (ipcMain: IpcMain) => {
   registerHandlers(ipcMain, cookieHandlers);
 };
 
+function createSubWindow(options: {
+  routeName: string;
+  hideAside?: boolean;
+  hideMenuBar?: boolean;
+  maximized?: boolean;
+  query?: Record<string, string>;
+}) {
+  const css = `
+  .layout>div>aside {
+    display: none;
+  }
+  .main-container{
+    margin: 0 !important;
+  }  
+  `;
+  const hideMenuBar = !!options.hideMenuBar;
+  const queryString = options.query ? new URLSearchParams(options.query).toString() : "";
+  const route = queryString ? `${options.routeName}?${queryString}` : options.routeName;
+
+  const subWindow = new BrowserWindow({
+    webPreferences: {
+      preload: join(__dirname2, "../preload/index.mjs"),
+      sandbox: false,
+      webSecurity: false,
+    },
+    width: 900,
+    height: 750,
+    autoHideMenuBar: hideMenuBar,
+  });
+
+  if (is.dev && process.env["ELECTRON_RENDERER_URL"]) {
+    const url = process.env["ELECTRON_RENDERER_URL"] + `/#/${route}`;
+    subWindow.loadURL(url);
+  } else {
+    subWindow.loadFile(join(__dirname2, "../renderer/index.html"), {
+      // Hash 路由只会解析 # 后面的查询参数。loadFile 的 query 会被放在
+      // index.html 与 hash 之间，导致 useRoute().query 在生产环境中为空。
+      hash: route,
+    });
+  }
+
+  subWindow.webContents.on("did-finish-load", () => {
+    if (options.hideAside) {
+      subWindow.webContents.insertCSS(css);
+    }
+  });
+  // subWindow.webContents.openDevTools();
+  if (options.maximized) {
+    subWindow.maximize();
+  }
+  return true;
+  return subWindow;
+}
+
 function createWindow(): void {
   Object.assign(windowConfig, WindowState.get("winBounds"));
+  // 如果x，y存在一个参数为负值，则重置为undefined
+  if (
+    (windowConfig.x !== undefined && windowConfig.x < 0) ||
+    (windowConfig.y !== undefined && windowConfig.y < 0)
+  ) {
+    windowConfig.x = undefined;
+    windowConfig.y = undefined;
+  }
 
   // Create the browser window.
   const mainWindow = new BrowserWindow({
@@ -137,7 +231,11 @@ function createWindow(): void {
     } else {
       // 用来静默启动
       const isHidden = process.argv.includes("--hidden");
-      if (!isHidden) mainWindow.show();
+      if (isHidden) {
+        mainWin.setSkipTaskbar(true);
+      } else {
+        mainWindow.show();
+      }
     }
   });
 
@@ -235,10 +333,15 @@ function createWindow(): void {
 
   // 触发关闭时触发
   mainWin.on("close", (event) => {
-    const appConfig = container.resolve<AppConfig>("appConfig");
+    const appConfig = container.resolve("appConfig");
 
     const closeToTray = appConfig.get("closeToTray");
     event.preventDefault();
+
+    if (process.platform === "darwin") {
+      quit();
+      return;
+    }
 
     if (closeToTray) {
       mainWin.hide();
@@ -249,7 +352,7 @@ function createWindow(): void {
   });
   // 窗口最小化
   mainWin.on("minimize", () => {
-    const appConfig = container.resolve<AppConfig>("appConfig");
+    const appConfig = container.resolve("appConfig");
     const minimizeToTray = appConfig.get("minimizeToTray");
     if (minimizeToTray) {
       // event.preventDefault();
@@ -259,7 +362,15 @@ function createWindow(): void {
   });
 
   // 新建托盘
-  const tray = new Tray(join(__dirname2, "../../resources/icon.png"));
+  const iconPath = join(__dirname2, "../../resources/icon.png");
+  const trayIcon = nativeImage.createFromPath(iconPath);
+
+  // macOS 需要使用模板图片模式来正确显示托盘图标大小和颜色
+  if (process.platform === "darwin") {
+    trayIcon.setTemplateImage(true);
+  }
+
+  const tray = new Tray(trayIcon);
   // 托盘名称
   tray.setToolTip("biliLive-tools");
   // 托盘菜单
@@ -267,6 +378,7 @@ function createWindow(): void {
     {
       label: "显示",
       click: () => {
+        mainWin.setSkipTaskbar(false);
         mainWin.show();
       },
     },
@@ -293,7 +405,18 @@ function createWindow(): void {
 }
 
 function createMenu(): void {
-  const menu = Menu.buildFromTemplate([
+  const isMac = process.platform === "darwin";
+
+  const template: Electron.MenuItemConstructorOptions[] = [];
+
+  // macOS 需要 appMenu 才能让 Cmd+Q 等系统快捷键正常工作
+  if (isMac) {
+    template.push({
+      role: "appMenu",
+    });
+  }
+
+  template.push(
     {
       label: "文件",
       submenu: [
@@ -324,25 +447,64 @@ function createMenu(): void {
             shell.openPath(app.getPath("logs"));
           },
         },
+        { type: "separator" },
         {
           label: "退出",
+          accelerator: isMac ? "Cmd+Q" : "Alt+F4",
           click: async () => {
             quit();
           },
         },
       ],
     },
+    // Edit 菜单提供 Cmd+C / Cmd+V / Cmd+A 等标准快捷键
+    {
+      role: "editMenu",
+    },
     {
       label: "开发者工具",
       role: "viewMenu",
     },
     {
+      label: "视图",
+      submenu: [
+        {
+          label: "后退",
+          accelerator: isMac ? "Cmd+[" : "Alt+Left",
+          click: () => {
+            const history = BrowserWindow.getFocusedWindow()?.webContents.navigationHistory;
+            if (history?.canGoBack()) {
+              history.goBack();
+            }
+          },
+        },
+        {
+          label: "前进",
+          accelerator: isMac ? "Cmd+]" : "Alt+Right",
+          click: () => {
+            const history = BrowserWindow.getFocusedWindow()?.webContents.navigationHistory;
+            if (history?.canGoForward()) {
+              history.goForward();
+            }
+          },
+        },
+        { type: "separator" },
+        {
+          label: "新建窗口",
+          accelerator: "CmdOrCtrl+N",
+          click: () => {
+            createSubWindow({ routeName: "" });
+          },
+        },
+      ],
+    },
+    {
       label: "帮助",
       submenu: [
         {
-          label: "赞助",
+          label: "官方文档",
           click: async () => {
-            shell.openExternal("https://afdian.com/a/renmu123");
+            shell.openExternal("https://docs.irenmu.com/");
           },
         },
         {
@@ -353,11 +515,9 @@ function createMenu(): void {
           },
         },
         {
-          label: "常见问题",
+          label: "赞助",
           click: async () => {
-            shell.openExternal(
-              "https://github.com/renmu123/biliLive-tools?tab=readme-ov-file#%E5%B8%B8%E8%A7%81%E9%97%AE%E9%A2%98",
-            );
+            shell.openExternal("https://afdian.com/a/renmu123");
           },
         },
         {
@@ -385,15 +545,22 @@ function createMenu(): void {
         },
       ],
     },
-  ]);
+  );
+
+  // macOS 需要 windowMenu 来提供窗口管理功能
+  if (isMac) {
+    template.push({
+      role: "windowMenu",
+    });
+  }
+
+  const menu = Menu.buildFromTemplate(template);
   Menu.setApplicationMenu(menu);
 }
 
-type createRecorderManagerType = Awaited<ReturnType<typeof createRecorderManager>>;
-
 const canQuit = async () => {
-  const taskQueue = container.resolve<TaskQueue>("taskQueue");
-  const recorderManager = container.resolve<createRecorderManagerType>("recorderManager");
+  const taskQueue = container.resolve("taskQueue");
+  const recorderManager = container.resolve("recorderManager");
 
   const tasks = taskQueue.list();
   const isRunningTask = tasks.some((task) =>
@@ -405,15 +572,17 @@ const canQuit = async () => {
   if (isRunningTask || isRecordingTask) {
     const confirm = await dialog.showMessageBox(mainWin, {
       message: "检测到有未完成的任务或录制，是否退出？",
-      buttons: ["取消", "退出"],
+      buttons: ["取消", "强制退出", "退出"],
     });
-    if (confirm.response === 1) {
+    if (confirm.response === 2) {
       // 手动停止正在录制的直播
       for (const recorder of recorderManager.manager.recorders) {
         if (recorder.state === "recording") {
           await recorderManager.manager.stopRecord(recorder.id);
         }
       }
+      return true;
+    } else if (confirm.response === 1) {
       return true;
     } else {
       return false;
@@ -465,8 +634,17 @@ export const relaunch = async () => {
 };
 
 export const setOpenAtLogin = (_event: IpcMainInvokeEvent, openAtLogin: boolean) => {
+  if (process.platform === "win32") {
+    // 兼容性清理
+    app.setLoginItemSettings({
+      openAtLogin: false,
+      name: "com.electron",
+    });
+  }
+
   app.setLoginItemSettings({
     openAtLogin,
+    args: ["--hidden"],
   });
 };
 
@@ -474,11 +652,18 @@ const gotTheLock = app.requestSingleInstanceLock();
 if (!gotTheLock) {
   app.quit();
 } else {
+  const sentryCrashSubmitURL = getSentryMinidumpSubmitURL(SENTRY_CRASH_DSN);
   crashReporter.start({
     uploadToServer: false,
+    submitURL: sentryCrashSubmitURL,
+    compress: true,
+    rateLimit: true,
+    globalExtra: {
+      product: "biliLive-tools",
+    },
   });
   app.whenReady().then(() => {
-    electronApp.setAppUserModelId("com.electron");
+    electronApp.setAppUserModelId("com.electron.biliLiveTools");
     installExtension("nhdogjmejiglipccpnnnanhbledajbpd")
       .then(({ name }) => log.debug(`Added Extension:  ${name}`))
       .catch((err) => log.debug("An error occurred: ", err));
@@ -509,7 +694,7 @@ if (!gotTheLock) {
 
     if (error.message.includes("listen EADDRINUSE")) {
       setTimeout(() => {
-        const appConfig = container.resolve<AppConfig>("appConfig");
+        const appConfig = container.resolve("appConfig");
         notify(mainWin.webContents, {
           type: "error",
           content: `检查是否有其他程序占用了${appConfig.get("port")}端口，请尝试更换端口或重启设备`,
@@ -607,6 +792,13 @@ const appInit = async () => {
     FFMPEG_PRESET_PATH,
     VIDEO_PRESET_PATH,
     DANMU_PRESET_PATH,
+    LOG_PATH,
+    FFMPEG_PATH,
+    FFPROBE_PATH,
+    DANMUKUFACTORY_PATH,
+    MESIO_PATH,
+    BILILIVERECORDER_PATH,
+    AUDIOWAVEFORM_PATH,
     userDataPath,
   } = await getConfigPath();
 
@@ -619,12 +811,14 @@ const appInit = async () => {
     defaultFfmpegPath: FFMPEG_PATH,
     defaultFfprobePath: FFPROBE_PATH,
     defaultMesioPath: MESIO_PATH,
+    defaultBililiveRecorderPath: BILILIVERECORDER_PATH,
+    defaultAudioWaveformPath: AUDIOWAVEFORM_PATH,
     defaultDanmakuFactoryPath: DANMUKUFACTORY_PATH,
     userDataPath,
     version: app.getVersion(),
   };
   container = await init(globalConfig);
-  const appConfig = container.resolve<AppConfig>("appConfig");
+  const appConfig = container.resolve("appConfig");
 
   await serverStart(
     {
@@ -636,6 +830,14 @@ const appInit = async () => {
     container,
   );
   nativeTheme.themeSource = appConfig.get("theme");
+  const menuBarVisible = appConfig.get("menuBarVisible");
+  mainWin.setMenuBarVisibility(menuBarVisible);
+  powerSaveController.setEnabled(appConfig.get("preventSystemSleep"));
+  appConfig.on("update", (newData, oldData) => {
+    if (newData.preventSystemSleep !== oldData.preventSystemSleep) {
+      powerSaveController.setEnabled(newData.preventSystemSleep);
+    }
+  });
 
   // 检测更新
   if (appConfig.get("autoUpdate")) {
@@ -645,11 +847,14 @@ const appInit = async () => {
       log.error("自动更新检查失败:", error);
     }
   }
+  if (appConfig.get("uploadCrashReport")) {
+    crashReporter.setUploadToServer(true);
+  }
   // taskQueueListen(container);
 };
 
 // const taskQueueListen = (container: AwilixContainer) => {
-//   const taskQueue = container.resolve<TaskQueue>("taskQueue");
+//   const taskQueue = container.resolve("taskQueue");
 //   taskQueue.on("task-start", ({ taskId }) => {
 //     mainWin.webContents.send("task-start", { taskId: taskId });
 //   });
@@ -677,11 +882,13 @@ const openDirectory = async (
 ) => {
   const { canceled, filePaths } = await dialog.showOpenDialog(mainWin, {
     ...opts,
+    defaultPath: fileDialogHistory.getDefaultPath("openDirectory", opts.defaultPath),
     properties: ["openDirectory"],
   });
   if (canceled) {
     return;
   } else {
+    fileDialogHistory.remember("openDirectory", filePaths[0]);
     return filePaths[0];
   }
 };
@@ -694,25 +901,37 @@ const openFile = async (_event: IpcMainInvokeEvent, options: OpenDialogOptions) 
   const { canceled, filePaths } = await dialog.showOpenDialog(mainWin, {
     properties,
     ...options,
+    defaultPath: fileDialogHistory.getDefaultPath("openFile", options.defaultPath),
   });
   if (canceled) {
     return;
   } else {
+    fileDialogHistory.remember("openFile", filePaths[0]);
     return filePaths;
   }
 };
 
 const saveDialog = async (_event: IpcMainInvokeEvent, options: SaveDialogOptions) => {
-  const { canceled, filePath } = await dialog.showSaveDialog(mainWin, options);
+  const { canceled, filePath } = await dialog.showSaveDialog(mainWin, {
+    ...options,
+    defaultPath: fileDialogHistory.getDefaultPath("save", options.defaultPath),
+  });
   if (canceled) {
     return;
   } else {
+    fileDialogHistory.remember("save", filePath);
     return filePath;
   }
 };
 
 const setTheme = (_event: IpcMainInvokeEvent, theme: Theme) => {
   nativeTheme.themeSource = theme;
+};
+
+const setMenuBarVisible = (_event: IpcMainInvokeEvent, visible: boolean) => {
+  if (mainWin) {
+    mainWin.setMenuBarVisibility(visible);
+  }
 };
 
 const checkUpdate = async () => {

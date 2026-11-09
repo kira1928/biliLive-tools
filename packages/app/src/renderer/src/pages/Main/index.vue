@@ -1,7 +1,8 @@
 <template>
   <n-space vertical>
-    <n-layout has-sider class="layout" position="absolute">
+    <n-layout :has-sider="!isMobile" class="layout" position="absolute">
       <n-layout-sider
+        v-if="!isMobile"
         bordered
         collapse-mode="width"
         :collapsed-width="64"
@@ -13,13 +14,13 @@
       >
         <n-menu
           v-model:value="activeKey"
+          v-model:expanded-keys="expandedMenuKeys"
           class="main-menu"
           :style="{ marginBottom: `${footerMenuOptions.length * 50}px` }"
           :collapsed="collapsed"
           :collapsed-width="64"
           :collapsed-icon-size="22"
           :options="menuOptions"
-          default-expand-all
         />
 
         <n-layout-footer position="absolute">
@@ -35,7 +36,17 @@
         </n-layout-footer>
       </n-layout-sider>
 
-      <n-layout class="main-container">
+      <n-layout :class="['main-container', route.name, { mobile: isMobile }]">
+        <div v-if="isMobile" class="mobile-header">
+          <n-button quaternary class="mobile-menu-trigger" @click="mobileMenuVisible = true">
+            <template #icon>
+              <n-icon size="36">
+                <MenuOutline />
+              </n-icon>
+            </template>
+          </n-button>
+          <div class="mobile-header-title">biliLive-tools</div>
+        </div>
         <router-view v-slot="{ Component }">
           <keep-alive
             :include="[
@@ -45,6 +56,7 @@
               'DanmakuFactory',
               'Convert2Mp4',
               'VideoMerge',
+              'FlvRepair',
               'BiliDownload',
               'recorder',
               'videoCut',
@@ -52,6 +64,8 @@
               'User',
               'About',
               'FileSync',
+              'FileBrowser',
+              'streamerDetail',
             ]"
           >
             <component :is="Component" />
@@ -60,6 +74,25 @@
       </n-layout>
     </n-layout>
   </n-space>
+  <n-drawer v-model:show="mobileMenuVisible" placement="left" :width="280">
+    <n-drawer-content
+      body-content-style="padding: 0; display: flex; flex-direction: column;"
+      class="mobile-drawer-content"
+    >
+      <n-menu
+        v-model:value="activeKey"
+        v-model:expanded-keys="expandedMenuKeys"
+        class="mobile-main-menu"
+        :options="menuOptions"
+      />
+      <n-menu
+        v-model:value="activeKey"
+        class="mobile-footer-menu"
+        :options="footerMenuOptions"
+        default-expand-all
+      />
+    </n-drawer-content>
+  </n-drawer>
   <AppSettingDialog v-model="settingVisible" ref="settingDialogRef"></AppSettingDialog>
   <ChangelogModal v-model:visible="changelogVisible"></ChangelogModal>
   <logModal v-model:visible="logVisible"></logModal>
@@ -70,17 +103,21 @@ defineOptions({
   name: "Main",
 });
 import { useStorage } from "@vueuse/core";
+import { useBreakpoints } from "@renderer/hooks/useBreakpoints";
 import { NIcon } from "naive-ui";
 import { RouterLink, useRoute, useRouter } from "vue-router";
 import {
-  BuildOutline as BookIcon,
+  BuildOutline as BuildIcon,
+  FolderOpenOutline as FolderIcon,
   HomeOutline as HomeIcon,
   InformationCircleOutline as InfoIcon,
   GitPullRequestOutline as QueueIcon,
   SettingsOutline as SettingIcon,
   LogOutOutline,
+  MenuOutline,
 } from "@vicons/ionicons5";
 import { DashboardOutlined as DashboardIcon, LiveTvRound } from "@vicons/material";
+import { VideoClip20Regular } from "@vicons/fluent";
 
 import defaultUserAvatar from "../../assets/images/moehime.jpg";
 import AppSettingDialog from "../../pages/setting/index.vue";
@@ -101,9 +138,31 @@ const { userInfo } = storeToRefs(useUserInfoStore());
 const route = useRoute();
 const activeKey = ref("Home");
 activeKey.value = route.name as string;
-const collapsed = useStorage("collapsed", true);
+const collapsed = useStorage("collapsed", false);
+const expandedMenuKeys = useStorage<Array<string | number>>("menu-expanded-keys", [
+  "videoProcessing",
+  "tools",
+]);
+const mobileMenuVisible = ref(false);
+const { isMobile } = useBreakpoints();
 
 appConfig.getAppConfig();
+quenuStore.init();
+
+watch(
+  () => route.fullPath,
+  () => {
+    activeKey.value = route.name as string;
+    mobileMenuVisible.value = false;
+  },
+  { immediate: true },
+);
+
+watch(isMobile, (value) => {
+  if (!value) {
+    mobileMenuVisible.value = false;
+  }
+});
 
 function renderIcon(icon: Component) {
   return () => h(NIcon, null, { default: () => h(icon) });
@@ -138,7 +197,11 @@ function renderQueueIcon(icon: Component) {
 
 function renderImg(src: string) {
   return () =>
-    h("img", { src, style: { height: "30px", width: "30px" }, referrerpolicy: "no-referrer" });
+    h("img", {
+      src,
+      style: { height: "25px", width: "25px", "border-radius": "50%" },
+      referrerpolicy: "no-referrer",
+    });
 }
 
 const router = useRouter();
@@ -155,6 +218,7 @@ const footerMenuOptions = computed<MenuOption[]>(() => {
           "a",
           {
             onClick: () => {
+              window.localStorage.removeItem("api");
               window.localStorage.setItem("key", "");
               router.push({ name: "Login" });
             },
@@ -249,17 +313,64 @@ const menuOptions = computed<MenuOption[]>(() => {
         ),
     },
     {
-      key: "videoCut",
+      key: "BiliDownload",
       label: () =>
         h(
           RouterLink,
           {
             to: {
-              name: "videoCut",
+              name: "BiliDownload",
             },
           },
-          { default: () => "切片" },
+          { default: () => "下载订阅" },
         ),
+    },
+    {
+      key: "FileSync",
+      label: () =>
+        h(
+          RouterLink,
+          {
+            to: {
+              name: "FileSync",
+            },
+          },
+          { default: () => "文件同步" },
+        ),
+    },
+  ];
+
+  const videoProcessingSubMenus = [
+    {
+      key: "videoCut",
+      label: () => {
+        if (!isWeb.value && appConfig.appConfig.cutPageInNewWindow) {
+          return h(
+            "a",
+            {
+              onClick: async () => {
+                await window.api.common.createSubWindow({
+                  routeName: "videoCut",
+                  hideAside: true,
+                  maximized: true,
+                  hideMenuBar: appConfig.appConfig.menuBarVisible ? false : true,
+                });
+              },
+            },
+            { default: () => "切片" },
+          );
+        } else {
+          return h(
+            RouterLink,
+            {
+              to: {
+                name: "videoCut",
+              },
+            },
+            { default: () => "切片" },
+          );
+        }
+      },
     },
     {
       key: "Convert2Mp4",
@@ -288,29 +399,16 @@ const menuOptions = computed<MenuOption[]>(() => {
         ),
     },
     {
-      key: "BiliDownload",
+      key: "FlvRepair",
       label: () =>
         h(
           RouterLink,
           {
             to: {
-              name: "BiliDownload",
+              name: "FlvRepair",
             },
           },
-          { default: () => "下载订阅" },
-        ),
-    },
-    {
-      key: "FileSync",
-      label: () =>
-        h(
-          RouterLink,
-          {
-            to: {
-              name: "FileSync",
-            },
-          },
-          { default: () => "文件同步" },
+          { default: () => "FLV修复" },
         ),
     },
   ];
@@ -324,7 +422,7 @@ const menuOptions = computed<MenuOption[]>(() => {
               name: "Home",
             },
           },
-          { default: () => "主页" },
+          { default: () => "压制" },
         ),
       key: "Home",
       icon: renderIcon(HomeIcon),
@@ -358,9 +456,15 @@ const menuOptions = computed<MenuOption[]>(() => {
       icon: renderIcon(DashboardIcon),
     },
     {
+      label: () => h("span", "视频处理"),
+      key: "videoProcessing",
+      icon: renderIcon(VideoClip20Regular),
+      children: videoProcessingSubMenus,
+    },
+    {
       label: () => h("span", "工具"),
       key: "tools",
-      icon: renderIcon(BookIcon),
+      icon: renderIcon(BuildIcon),
       children: toolsSubMenus,
     },
     {
@@ -377,21 +481,38 @@ const menuOptions = computed<MenuOption[]>(() => {
       key: "Queue",
       icon: renderQueueIcon(QueueIcon),
     },
-    {
+  ];
+  if (isWeb.value) {
+    menus.push({
       label: () =>
         h(
           RouterLink,
           {
             to: {
-              name: "User",
+              name: "FileBrowser",
             },
           },
-          { default: () => "用户" },
+          { default: () => "文件浏览器" },
         ),
-      key: "User",
-      icon: renderImg(userInfo.value?.profile?.face || defaultUserAvatar),
-    },
-  ];
+      key: "FileBrowser",
+      icon: renderIcon(FolderIcon),
+    });
+  }
+  menus.push({
+    label: () =>
+      h(
+        RouterLink,
+        {
+          to: {
+            name: "User",
+          },
+        },
+        { default: () => "用户" },
+      ),
+    key: "User",
+    icon: renderImg(userInfo.value?.profile?.face || defaultUserAvatar),
+  });
+
   return menus;
 });
 
@@ -455,23 +576,82 @@ initChanglog();
 <style lang="less">
 @import "../../assets/css/styles.less";
 
+.layout {
+  inset: 0;
+}
+
 .main-container {
   margin: 15px;
   margin-right: 0px;
 
   & > .n-layout-scroll-container {
     padding-right: 10px;
+    overflow-x: auto;
+  }
+  &.videoCut,
+  &.LiveVideoPlayer {
+    margin: 0px;
+    margin-left: 15px;
+    margin-right: 10px;
+    & > .n-layout-scroll-container {
+      padding-right: 0px;
+    }
   }
 }
+
+.mobile-header {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--bg-primary);
+  border-bottom: 1px solid var(--border-secondary);
+  margin-bottom: 10px;
+  padding: 10px 0;
+}
+
+.mobile-menu-trigger {
+  flex: none;
+}
+
+.mobile-header-title {
+  font-size: 18px;
+  font-weight: bold;
+  color: var(--text-primary);
+}
+
 .main-menu {
   margin-bottom: 100px;
 }
+
 .footer-menu {
   position: relative;
   z-index: 10;
-  background: white;
-  @media screen and (prefers-color-scheme: dark) {
-    background: #18181c;
+  background: var(--bg-primary);
+}
+
+.mobile-main-menu {
+  flex: 1 0 auto;
+}
+
+.mobile-footer-menu {
+  flex-shrink: 0;
+  border-top: 1px solid var(--border-secondary);
+}
+
+.mobile-drawer-content {
+  > .n-drawer-body {
+    min-height: 0;
+  }
+}
+
+&.mobile {
+  margin: 0;
+
+  & > .n-layout-scroll-container {
+    padding: 0 10px 10px 10px;
   }
 }
 </style>

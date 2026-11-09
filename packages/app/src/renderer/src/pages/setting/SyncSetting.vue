@@ -14,17 +14,17 @@
       </p>
     </div>
 
-    <n-form label-placement="left" :label-width="145">
+    <n-form label-placement="left" :label-width="labelWidth">
       <n-tabs type="segment" style="margin-top: 10px" class="tabs">
         <n-tab-pane class="tab-pane" name="syncConfig" tab="同步器" display-directive="show:lazy">
           <div class="sync-config-list">
             <n-card
-              v-for="(config, index) in config.sync.syncConfigs"
-              :key="config.id"
+              v-for="(item, index) in config.sync.syncConfigs"
+              :key="item.id"
               class="sync-config-card"
             >
               <template #header>
-                <n-text strong>{{ config.name }}</n-text>
+                <n-text strong>{{ item.name }}</n-text>
               </template>
               <template #header-extra>
                 <n-space align="center">
@@ -33,9 +33,12 @@
                 </n-space>
               </template>
               <n-space vertical>
-                <n-text>同步源: {{ getSyncSourceLabel(config.syncSource) }}</n-text>
-                <n-text>目录结构: {{ config.folderStructure }}</n-text>
-                <n-text>文件类型: {{ getTargetFilesLabel(config.targetFiles) }}</n-text>
+                <n-text>同步源: {{ getSyncSourceLabel(item.syncSource) }}</n-text>
+                <n-text v-if="item.syncSource === 'aliyunpan'">
+                  上传位置: {{ getAliyunpanDriveTypeLabel(item.aliyunpanDriveType) }}
+                </n-text>
+                <n-text>目录结构: {{ item.folderStructure }}</n-text>
+                <n-text>文件类型: {{ getTargetFilesLabel(item.targetFiles) }}</n-text>
               </n-space>
             </n-card>
             <n-card class="sync-config-card" @click="addSyncConfig">
@@ -48,12 +51,7 @@
             </n-card>
           </div>
         </n-tab-pane>
-        <n-tab-pane
-          class="tab-pane"
-          name="BaiduPCS"
-          tab="BaiduPCS-GO(百度网盘)"
-          display-directive="show:lazy"
-        >
+        <n-tab-pane class="tab-pane" name="BaiduPCS" tab="百度网盘" display-directive="show:lazy">
           <n-form-item>
             <template #label> 项目地址 </template>
             <a href="https://github.com/qjfoidnh/BaiduPCS-Go" class="external" target="_blank"
@@ -64,7 +62,7 @@
             <template #label>
               <Tip
                 text="可执行文件"
-                tip="测试版本为3.9.9，上传不携带任何参数，需要自定义请直接去修改配置文件"
+                tip="测试版本为4.0.0，上传不携带任何参数，需要自定义请直接去修改配置文件"
               >
               </Tip>
             </template>
@@ -94,12 +92,7 @@
             </n-icon>
           </n-form-item>
         </n-tab-pane>
-        <n-tab-pane
-          class="tab-pane"
-          name="aliyunpan"
-          tab="aliyunpan(阿里云盘)"
-          display-directive="show:lazy"
-        >
+        <n-tab-pane class="tab-pane" name="aliyunpan" tab="阿里云盘" display-directive="show:lazy">
           <n-form-item>
             <template #label> 项目地址 </template>
             <a href="https://github.com/tickstep/aliyunpan" class="external" target="_blank"
@@ -135,7 +128,7 @@
             </n-icon>
           </n-form-item>
         </n-tab-pane>
-        <n-tab-pane class="tab-pane" name="alist" tab="alist" display-directive="show:lazy">
+        <n-tab-pane class="tab-pane" name="alist" tab="Alist" display-directive="show:lazy">
           <n-form-item>
             <template #label> 项目地址 </template>
             <a href="https://alistgo.com" class="external" target="_blank">https://alistgo.com</a>
@@ -164,6 +157,16 @@
               <template #suffix>KB</template>
             </n-input-number>
           </n-form-item>
+          <n-form-item>
+            <template #label>
+              <Tip
+                text="重试次数"
+                tip="失败后自动重试，仅限于本地上传至alist服务端，并非alist服务端内部的上传重试"
+              ></Tip>
+            </template>
+            <n-input-number v-model:value="config.sync.alist.retry" min="0" step="1" max="10">
+            </n-input-number>
+          </n-form-item>
         </n-tab-pane>
         <n-tab-pane class="tab-pane" name="pan123" tab="123网盘" display-directive="show:lazy">
           <n-form-item>
@@ -175,6 +178,7 @@
                 align-items: center;
                 width: 100%;
               "
+              class="pan123-header"
             >
               <a
                 href="https://github.com/renmu123/123pan-uploader"
@@ -282,7 +286,7 @@
         <template #header>
           <n-text>{{ editingConfigIndex === null ? "添加" : "编辑" }}同步配置</n-text>
         </template>
-        <n-form label-placement="left" :label-width="100">
+        <n-form label-placement="left" :label-width="modalLabelWidth">
           <n-form-item label="配置名称">
             <n-input v-model:value="editingConfig.name" placeholder="请输入配置名称" />
           </n-form-item>
@@ -302,7 +306,7 @@
             <template #label>
               <Tip
                 text="目录结构"
-                tip="如果是本地复制，请带上文件夹路径<br/>支持以下占位符：<br/>平台：{{platform}}<br/>主播名：{{user}}<br/>日期：{{now}}<br/>年：{{yyyy}}<br/>月：{{MM}}<br/>日：{{dd}}"
+                tip="如果是本地复制，请带上文件夹路径<br/>支持以下占位符：<br/>软件平台：{{software}}<br/>平台：{{platform}}<br/>主播名：{{user}}<br/>日期：{{now}}<br/>年：{{yyyy}}<br/>月：{{MM}}<br/>日：{{dd}}<br/>时：{{HH}}<br/>分：{{mm}}<br/>秒：{{ss}}"
               >
               </Tip>
             </template>
@@ -317,6 +321,30 @@
                 <n-checkbox value="cover">封面图片</n-checkbox>
               </n-space>
             </n-checkbox-group>
+          </n-form-item>
+          <n-form-item v-if="editingConfig.syncSource === 'aliyunpan'" label="上传位置">
+            <n-select
+              v-model:value="editingConfig.aliyunpanDriveType"
+              :options="[
+                { label: '备份盘', value: 'backup' },
+                { label: '资源库', value: 'resource' },
+              ]"
+            />
+          </n-form-item>
+          <n-form-item v-if="editingConfig.syncSource === 'alist'">
+            <template #label>
+              <Tip
+                text="字符串过滤"
+                tip="某些网盘会有一些怪癖，用来过滤一些字符串<br/>过滤四字节字符串：alist(天翼盘)"
+              >
+              </Tip>
+            </template>
+            <n-select
+              v-model:value="editingConfig.stringFilters"
+              multiple
+              :options="[{ label: '过滤四字节字符串', value: 'filterFourByteChars' }]"
+              placeholder="请选择字符串过滤选项"
+            />
           </n-form-item>
         </n-form>
         <template #footer>
@@ -356,13 +384,14 @@
 
 <script setup lang="ts">
 import { FolderOpenOutline, Add } from "@vicons/ionicons5";
+import { useBreakpoints } from "@renderer/hooks";
 import { showFileDialog } from "@renderer/utils/fileSystem";
 import { uuid, sha256 } from "@renderer/utils";
 
 import { syncApi } from "@renderer/apis";
 import { useConfirm } from "@renderer/hooks";
 
-import type { AppConfig, SyncType, SyncConfig } from "@biliLive-tools/types";
+import type { AppConfig, SyncType, SyncConfig, AliyunPanDriveType } from "@biliLive-tools/types";
 
 const config = defineModel<AppConfig>("data", {
   default: () => ({
@@ -372,6 +401,13 @@ const config = defineModel<AppConfig>("data", {
       syncConfigs: [],
     },
   }),
+});
+const { isMobile } = useBreakpoints();
+const labelWidth = computed(() => {
+  return isMobile.value ? "90px" : "145px";
+});
+const modalLabelWidth = computed(() => {
+  return isMobile.value ? "90px" : "100px";
 });
 
 const isWeb = computed(() => window.isWeb);
@@ -597,6 +633,8 @@ const editingConfig = ref<SyncConfig>({
   syncSource: "baiduPCS",
   folderStructure: "/录播/{{user}}/{{yyyy}}-{{MM}}",
   targetFiles: [],
+  aliyunpanDriveType: "backup",
+  stringFilters: [],
 });
 
 const syncConfigModalVisible = ref(false);
@@ -608,6 +646,14 @@ const getSyncSourceLabel = (value: string) => {
     alist: "alist",
   };
   return options[value] || value;
+};
+
+const getAliyunpanDriveTypeLabel = (value?: AliyunPanDriveType) => {
+  const options = {
+    backup: "备份盘",
+    resource: "资源库",
+  };
+  return options[value || "backup"];
 };
 
 const getTargetFilesLabel = (values: string[]) => {
@@ -628,6 +674,8 @@ const addSyncConfig = () => {
     syncSource: "baiduPCS",
     folderStructure: "/录播/{{user}}/{{yyyy}}-{{MM}}",
     targetFiles: [],
+    aliyunpanDriveType: "backup",
+    stringFilters: [],
   };
   syncConfigModalVisible.value = true;
 };
@@ -641,6 +689,8 @@ const editSyncConfig = (index: number) => {
     syncSource: originalConfig.syncSource,
     folderStructure: originalConfig.folderStructure,
     targetFiles: [...originalConfig.targetFiles],
+    aliyunpanDriveType: originalConfig.aliyunpanDriveType || "backup",
+    stringFilters: [...(originalConfig.stringFilters || [])],
   };
   syncConfigModalVisible.value = true;
 };
@@ -683,6 +733,7 @@ const saveSyncConfig = () => {
     notice.error("至少选择一个文件类型");
     return;
   }
+  editingConfig.value.folderStructure = editingConfig.value.folderStructure.trim();
   if (editingConfigIndex.value === null) {
     config.value.sync.syncConfigs.push({ ...editingConfig.value });
   } else {
@@ -736,6 +787,12 @@ const saveSyncConfig = () => {
   }
   &:hover {
     box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+  }
+}
+
+@media (max-width: 750px) {
+  .pan123-header {
+    flex-wrap: wrap;
   }
 }
 </style>

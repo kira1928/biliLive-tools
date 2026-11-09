@@ -1,4 +1,4 @@
-import path from "node:path";
+﻿import path from "node:path";
 import fs from "fs-extra";
 import axios from "axios";
 
@@ -16,21 +16,44 @@ import {
   BilibiliLiveDownloadVideoTask,
 } from "./task.js";
 import log from "../utils/log.js";
-import BiliCheckQueue from "./BiliCheckQueue.js";
 import { sleep, encrypt, decrypt, getTempPath, trashItem, uuid } from "../utils/index.js";
 import { sendNotify } from "../notify.js";
-import { getFfmpegPath } from "./video.js";
+import { getBinPath, pasrseMetadata } from "./video.js";
+import {
+  formatTitle,
+  formatSeasonTitle,
+  formatPartTitle,
+  formatDesc,
+  buildRoomLink,
+} from "../utils/webhook.js";
 
-import type {
-  BiliupConfig,
-  BiliUser,
-  GlobalConfig,
-  AppConfig as AppConfigType,
-} from "@biliLive-tools/types";
+import type { BiliupConfig, BiliUser, AppConfig as AppConfigType } from "@biliLive-tools/types";
 import type { MediaOptions, DescV2 } from "@renmu/bili-api/dist/types/index.js";
 import type { Item as MediaItem } from "./BiliCheckQueue.js";
 
 type ClientInstance = InstanceType<typeof Client>;
+type ParsedUploadFileMeta = Awaited<ReturnType<typeof pasrseMetadata>>;
+type UploadFileMeta = ParsedUploadFileMeta & {
+  index?: number;
+};
+type UploadFileItem = {
+  path: string;
+  title?: string;
+  meta?: UploadFileMeta;
+};
+type UploadFileInput = string[] | UploadFileItem[];
+type NormalizedUploadFileItem = {
+  path: string;
+  title: string;
+  meta?: UploadFileMeta;
+};
+type UploadFormatContext = {
+  title: string;
+  username: string;
+  time: string;
+  roomId: string | number;
+  filename: string;
+};
 
 // 用于存储最近发送的通知，key为aid，value为发送时间戳
 const notificationCache = new Map<number, number>();
@@ -46,7 +69,7 @@ async function sendNotifyWithThrottle(
   title: string,
   desp: string,
   aid: number,
-  options?: { type?: "mediaStatusCheck" },
+  options?: Parameters<typeof sendNotify>[2],
 ) {
   const now = Date.now();
   const lastNotificationTime = notificationCache.get(aid);
@@ -174,7 +197,7 @@ async function sliceDownload(
 ) {
   if ((await fs.pathExists(output)) && !options.override) throw new Error(`${output}已存在`);
 
-  const { ffmpegPath } = getFfmpegPath();
+  const { ffmpegPath } = getBinPath();
   const downloader = new M3U8Downloader(url, output, {
     convert2Mp4: true,
     ffmpegPath: ffmpegPath,
@@ -208,7 +231,7 @@ async function download(
     throw new Error(`${options.output}已存在`);
 
   const client = createClient(uid);
-  const { ffmpegPath } = getFfmpegPath();
+  const { ffmpegPath } = getBinPath();
   const tmpPath = getTempPath();
   const command = await client.video.dashDownload(
     { ...options, ffmpegBinPath: ffmpegPath, cachePath: tmpPath, disableVideo: options.onlyAudio },
@@ -311,13 +334,28 @@ export function formatOptions(options: BiliupConfig, coverDir: string | undefine
     cover = undefined;
   }
 
-  const data: MediaOptions = {
+  // 联合投稿时自动设置copyright为3
+  const hasStaffs = !!(options.staffs && options.staffs.length > 0);
+  const finalCopyright = hasStaffs ? 3 : options.copyright;
+
+  let creationStatement: { id: -1 | 1 | 2 | 3 | 4 } | undefined = undefined;
+  if (finalCopyright === 1 || finalCopyright === 3) {
+    if (options.creationStatement) {
+      creationStatement = { id: options.creationStatement };
+    }
+    if (finalCopyright === 3 && !options.creationStatement) {
+      creationStatement = { id: -1 };
+    }
+  }
+
+  const data = {
     cover: cover,
     title: options.title,
-    tid: options.tid,
+    // 移除老分区后，web的默认分区为21
+    tid: 21,
     human_type2: options.human_type2,
     tag: tags.slice(0, 10).join(","),
-    copyright: options.copyright,
+    copyright: finalCopyright,
     source: options.source,
     dolby: options.dolby,
     lossless_music: options.hires,
@@ -325,7 +363,7 @@ export function formatOptions(options: BiliupConfig, coverDir: string | undefine
     up_close_danmu: options.closeDanmu ? true : false,
     up_close_reply: options.closeReply ? true : false,
     up_selection_reply: options.selectiionReply ? true : false,
-    open_elec: options.openElec,
+    open_elec: 0,
     desc_v2: hasAt ? descV2 : undefined,
     desc: desc,
     recreate: options.recreate || -1,
@@ -333,9 +371,20 @@ export function formatOptions(options: BiliupConfig, coverDir: string | undefine
     topic_id: options.topic_id,
     mission_id: options.mission_id,
     is_only_self: options.is_only_self || 0,
+    space_hidden: options.space_hidden || 2,
     dtime: options.dtime ? options.dtime : undefined,
+    act_reserve: options.act_reserve ? options.act_reserve : undefined,
+    staffs:
+      options.staffs && options.staffs.length > 0
+        ? options.staffs.map((s: any) => ({ title: s.title, mid: Number(s.mid) }))
+        : undefined,
+    watermark:
+      finalCopyright === 2 || options.watermark === undefined
+        ? undefined
+        : { state: options.watermark },
+    creation_statement: creationStatement,
   };
-  return data;
+  return data as MediaOptions;
 }
 
 /**
@@ -357,7 +406,7 @@ export async function addMediaApi(
   video: { cid: number; filename: string; title: string; desc?: string }[],
   options: BiliupConfig,
 ) {
-  const globalConfig = container.resolve<GlobalConfig>("globalConfig");
+  const globalConfig = container.resolve("globalConfig");
   const mediaOptions = formatOptions(options, path.join(globalConfig.userDataPath, "cover"));
   const client = createClient(uid);
   if (appConfig?.get("biliUpload")?.useBCutAPI) {
@@ -375,10 +424,12 @@ export async function editMediaApi(
   video: { cid: number; filename: string; title: string; desc?: string }[],
   options: BiliupConfig,
 ) {
-  const mediaOptions = {};
-  console.log("编辑视频", options);
+  const mediaOptions = {
+    sortByCid: options.sortByCid,
+  };
+  // console.log("编辑视频", options);
 
-  // const globalConfig = container.resolve<GlobalConfig>("globalConfig");
+  // const globalConfig = container.resolve("globalConfig");
   // const mediaOptions = formatOptions(options, path.join(globalConfig.userDataPath, "cover"));
   const client = createClient(uid);
   return client.platform.editMediaWebApi(video, { aid, ...mediaOptions }, "append");
@@ -401,6 +452,8 @@ function formatMediaOptions(options: AppConfigType["biliUpload"]) {
     line: line,
     zone: zone,
     limitRate: Math.floor((options.limitRate || 0) / (options.concurrency || 1)),
+    bcutPreUpload: true,
+    lineBlacklist: ["cs-bldsa"],
   };
 }
 
@@ -430,7 +483,18 @@ async function biliMediaAction(
             `《${media.title}》稿件审核通过`,
             `请前往B站创作中心查看详情\n稿件名：${media.title}`,
             options.aid!,
-            { type: "mediaStatusCheck" },
+            {
+              type: "mediaStatusCheck",
+              context: {
+                event: "media_status_success",
+                eventLabel: "稿件审核通过",
+                aid: options.aid,
+                mediaTitle: media.title,
+                mediaStatus: media.state_desc,
+                mediaStateCode: media.state,
+                uid: options.uid,
+              },
+            },
           );
         } catch (error) {
           log.error("发送通知失败", error);
@@ -473,7 +537,18 @@ async function biliMediaAction(
             `《${media.title}》稿件审核未通过`,
             `请前往B站创作中心查看详情\n稿件名：${media.title}\n状态：${media.state_desc}\n状态码：${media.state}`,
             options.aid!,
-            { type: "mediaStatusCheck" },
+            {
+              type: "mediaStatusCheck",
+              context: {
+                event: "media_status_failure",
+                eventLabel: "稿件审核未通过",
+                aid: options.aid,
+                mediaTitle: media.title,
+                mediaStatus: media.state_desc,
+                mediaStateCode: media.state,
+                uid: options.uid,
+              },
+            },
           );
         } catch (error) {
           log.error("发送通知失败", error);
@@ -483,16 +558,199 @@ async function biliMediaAction(
   }
 }
 
+function normalizeUploadFiles(filePath: UploadFileInput): NormalizedUploadFileItem[] {
+  return filePath.map((item) => {
+    if (typeof item === "string") {
+      return {
+        path: item,
+        title: path.parse(item).name,
+      };
+    }
+
+    return {
+      path: item.path,
+      title: item.title ?? path.parse(item.path).name,
+      meta: item.meta,
+    };
+  });
+}
+
+async function resolveUploadFileMeta(
+  item: NormalizedUploadFileItem,
+  onErrorMessage: string,
+): Promise<UploadFileMeta | null> {
+  if (item.meta !== undefined) {
+    return item.meta;
+  }
+
+  try {
+    return await pasrseMetadata({
+      videoFilePath: item.path,
+    });
+  } catch (e) {
+    log.warn(onErrorMessage, e);
+    return null;
+  }
+}
+
+function getUploadFormatContext(
+  meta: UploadFileMeta | null,
+  filePath: string,
+): UploadFormatContext | null {
+  if (!meta?.title || !meta.username || !meta.roomId || !meta.startTimestamp) {
+    return null;
+  }
+
+  const filename = path.parse(filePath).name;
+  return {
+    title: meta.title,
+    username: meta.username,
+    time: new Date(meta.startTimestamp * 1000).toISOString(),
+    roomId: meta.roomId,
+    filename: filename,
+  };
+}
+
+function hasTemplateVariable(template?: string) {
+  return !!template?.trim() && (template.includes("{{") || template.includes("<%"));
+}
+
+/**
+ * 预格式化选项
+ * 解析视频元数据并格式化标题、分P标题和转载来源
+ * @param options 上传配置
+ * @param filePath 视频文件路径数组
+ * @returns 格式化后的配置
+ */
+export async function preFormatOptions(
+  options: BiliupConfig,
+  filePath: UploadFileInput,
+): Promise<{
+  options: BiliupConfig;
+  videos: { path: string; title: string }[];
+}> {
+  if (filePath.length === 0) {
+    return { options, videos: [] };
+  }
+
+  const normalizedFiles = normalizeUploadFiles(filePath);
+
+  // 判断是否需要解析元数据
+  const needParseForTitle = hasTemplateVariable(options.title);
+  const needParseForSource = options.copyright === 2 && !options.source;
+  const needParseForPartTitle = hasTemplateVariable(options.partTitleTemplate);
+  const needParseForDesc = hasTemplateVariable(options.desc);
+  const needParseForSeasonTitle =
+    !!options.seasonId &&
+    hasTemplateVariable(options.seasonTitleTemplate) &&
+    options.seasonTitleTemplate?.trim() !== "{{mediaTitle}}";
+
+  const resultOptions = { ...options };
+  const formatSeasonOptions = (context?: UploadFormatContext | null) => {
+    if (options.seasonId) {
+      resultOptions.seasonTitleTemplate = formatSeasonTitle(
+        {
+          filename: path.parse(normalizedFiles[0].path).name,
+          ...context,
+          mediaTitle: resultOptions.title,
+        },
+        options.seasonTitleTemplate,
+      );
+    }
+  };
+
+  if (
+    !needParseForTitle &&
+    !needParseForSource &&
+    !needParseForPartTitle &&
+    !needParseForDesc &&
+    !needParseForSeasonTitle
+  ) {
+    formatSeasonOptions();
+    // 不需要解析，直接返回
+    return {
+      options: resultOptions,
+      videos: normalizedFiles.map((item) => ({
+        path: item.path,
+        title: item.title,
+      })),
+    };
+  }
+
+  let firstFormatContext: UploadFormatContext | null = null;
+  if (needParseForTitle || needParseForDesc || needParseForSource || needParseForSeasonTitle) {
+    const firstFile = normalizedFiles[0];
+    const firstMeta = await resolveUploadFileMeta(firstFile, "解析视频文件信息失败");
+    firstFormatContext = getUploadFormatContext(firstMeta, firstFile.path);
+
+    // 格式化主标题
+    if (needParseForTitle && firstFormatContext) {
+      resultOptions.title = formatTitle(firstFormatContext, options.title);
+    }
+
+    // 格式化简介
+    if (needParseForDesc && firstFormatContext) {
+      resultOptions.desc = formatDesc(firstFormatContext, options.desc!);
+    }
+
+    // 处理转载来源
+    if (needParseForSource) {
+      if (firstMeta?.platform && firstMeta.roomId) {
+        const source = buildRoomLink(firstMeta.platform, firstMeta.roomId);
+        if (source) {
+          resultOptions.source = source;
+        } else {
+          log.warn(
+            `构建转载来源链接失败，平台${firstMeta.platform}或房间号${firstMeta.roomId}可能无效`,
+          );
+        }
+      }
+      if (!resultOptions.source && firstMeta?.roomId) {
+        // 如果平台信息不可用，但有房间号，尝试使用房间号
+        resultOptions.source = firstMeta.roomId;
+      }
+    }
+  }
+
+  formatSeasonOptions(firstFormatContext);
+
+  // 格式化分P标题
+  const videos: { path: string; title: string }[] = [];
+  if (needParseForPartTitle) {
+    for (let i = 0; i < normalizedFiles.length; i++) {
+      const item = normalizedFiles[i];
+      const itemMeta = await resolveUploadFileMeta(item, `解析分P[${i + 1}]元数据失败，使用原标题`);
+      const itemFormatContext = getUploadFormatContext(itemMeta, item.path);
+
+      if (itemFormatContext) {
+        const formattedTitle = formatPartTitle(
+          {
+            ...itemFormatContext,
+            index: itemMeta?.index ?? i + 1,
+          },
+          options.partTitleTemplate!,
+        );
+        videos.push({ path: item.path, title: formattedTitle });
+      } else {
+        videos.push({ path: item.path, title: item.title });
+        log.warn(`分P[${i + 1}]元数据不完整，使用原标题`);
+      }
+    }
+  } else {
+    // 不需要格式化分P标题，使用原标题
+    for (const item of normalizedFiles) {
+      videos.push({ path: item.path, title: item.title });
+    }
+  }
+
+  return { options: resultOptions, videos };
+}
+
 /**
  * 上传稿件
  */
 async function addMedia(
-  filePath:
-    | string[]
-    | {
-        path: string;
-        title?: string;
-      }[],
+  filePath: UploadFileInput,
   options: BiliupConfig,
   uid: number,
   extraOptions?: {
@@ -503,37 +761,42 @@ async function addMedia(
     checkCallback?: (status: "completed" | "error") => void;
   },
 ) {
-  if (options.title.length > 80) {
+  // 预格式化选项（解析元数据、格式化标题等）
+  const { options: formattedOptions, videos } = await preFormatOptions(options, filePath);
+
+  if (formattedOptions.title.length > 80) {
     throw new Error("标题不能超过80个字符");
   }
   const client = createClient(uid);
 
   const pTask = new BiliAddVideoTask(
     {
-      name: `创建稿件：${options.title}`,
+      name: `创建稿件：${formattedOptions.title}`,
       uid,
-      mediaOptions: options,
+      mediaOptions: formattedOptions,
     },
     {
       onEnd: async (data: { aid: number; bvid: string }) => {
         try {
           // 合集相关功能
-          if (options.seasonId) {
+          if (formattedOptions.seasonId) {
             const archive = await client.platform.getArchive({ aid: data.aid });
-            log.debug("合集稿件", archive);
             const cid = archive.videos[0].cid;
-            let sectionId = options.sectionId;
-            if (!options.sectionId) {
-              sectionId = (await client.platform.getSeasonDetail(options.seasonId)).sections
-                .sections[0].id;
+            let sectionId = formattedOptions.sectionId;
+            if (!formattedOptions.sectionId) {
+              sectionId = (await client.platform.getSeasonDetail(formattedOptions.seasonId))
+                .sections.sections[0].id;
+            }
+            if (!sectionId) {
+              throw new Error("无法获取合集分区ID");
             }
             client.platform.addMedia2Season({
-              sectionId: sectionId!,
+              sectionId: sectionId,
               episodes: [
                 {
                   aid: data.aid,
                   cid: cid,
-                  title: options.title,
+                  title: formattedOptions.seasonTitleTemplate || formattedOptions.title,
                 },
               ],
             });
@@ -544,11 +807,11 @@ async function addMedia(
         // 稿件检查
         if (
           extraOptions?.forceCheck ||
-          (options.autoComment && options.comment) ||
+          (formattedOptions.autoComment && formattedOptions.comment) ||
           appConfig.get("notification")?.task?.mediaStatusCheck?.length ||
           extraOptions?.afterUploadDeletAction === "deleteAfterCheck"
         ) {
-          const commentQueue = container.resolve<BiliCheckQueue>("commentQueue");
+          const commentQueue = container.resolve("commentQueue");
           commentQueue.add({
             aid: data.aid,
             uid: uid,
@@ -558,12 +821,12 @@ async function addMedia(
             biliMediaAction(
               status,
               {
-                comment: options.autoComment ? options.comment : "",
-                top: options.commentTop || false,
+                comment: formattedOptions.autoComment ? formattedOptions.comment : "",
+                top: formattedOptions.commentTop || false,
                 notification: !!appConfig.get("notification")?.task?.mediaStatusCheck?.length,
                 removeOriginAfterUploadCheck:
                   extraOptions?.afterUploadDeletAction === "deleteAfterCheck",
-                files: filePath.map((item) => (typeof item === "string" ? item : item.path)),
+                files: videos.map((video) => video.path),
                 uid: uid,
                 aid: data.aid,
               },
@@ -575,9 +838,9 @@ async function addMedia(
 
         // 处理上传后操作
         if (extraOptions?.afterUploadDeletAction === "delete") {
-          for (const item of filePath) {
+          for (const video of videos) {
             try {
-              trashItem(typeof item === "string" ? item : item.path);
+              trashItem(video.path);
             } catch (error) {
               log.error("删除源文件失败", error);
             }
@@ -589,11 +852,7 @@ async function addMedia(
 
   const config = appConfig.getAll();
   const uploadOptions = config.biliUpload;
-  for (const item of filePath) {
-    const part = {
-      path: typeof item === "string" ? item : item.path,
-      title: typeof item === "string" ? path.parse(item).name : item.title,
-    };
+  for (const part of videos) {
     const uploader = new WebVideoUploader(part, client.auth, formatMediaOptions(uploadOptions));
 
     const task = new BiliPartVideoTask(
@@ -602,6 +861,7 @@ async function addMedia(
         name: `上传视频：${part.title}(${path.parse(part.path).base})`,
         pid: pTask.taskId,
         limitTime: extraOptions?.limitedUploadTime ?? [],
+        uid: pTask.uid,
       },
       {},
     );
@@ -619,34 +879,36 @@ async function addMedia(
  */
 export async function editMedia(
   aid: number,
-  filePath:
-    | string[]
-    | {
-        path: string;
-        title?: string;
-      }[],
-  options: BiliupConfig | any,
+  filePath: UploadFileInput,
+  options: BiliupConfig,
   uid: number,
   extraOptions?: {
     limitedUploadTime?: [] | [string, string];
     afterUploadDeletAction?: "none" | "delete" | "deleteAfterCheck";
     // 强制检查稿件状态
     forceCheck?: boolean;
+    // 用于排序，按照列表顺序排序，cid可能为空，如果cid为空从上传分P件名中提取cid
+    sortParams?: { filePath: string; cid?: number }[];
     checkCallback?: (status: "completed" | "error") => void;
   },
 ) {
   if (filePath.length === 0) {
     throw new Error("请至少上传一个视频");
   }
+
+  // 预格式化选项（解析元数据、格式化标题等）
+  const { options: formattedOptions, videos } = await preFormatOptions(options, filePath);
+
   const client = createClient(uid);
-  const title = typeof filePath[0] === "string" ? filePath[0] : filePath[0].title;
+  const title = videos[0].title;
 
   const pTask = new BiliEditVideoTask(
     {
       name: `编辑稿件：${title}`,
       uid,
-      mediaOptions: options,
+      mediaOptions: formattedOptions,
       aid,
+      sortParams: extraOptions?.sortParams,
     },
     {
       onEnd: async () => {
@@ -656,7 +918,7 @@ export async function editMedia(
           appConfig.get("notification")?.task?.mediaStatusCheck?.length ||
           extraOptions?.afterUploadDeletAction === "deleteAfterCheck"
         ) {
-          const commentQueue = container.resolve<BiliCheckQueue>("commentQueue");
+          const commentQueue = container.resolve("commentQueue");
           commentQueue.add({ aid: aid, uid });
           commentQueue.once("update", (_, status, media) => {
             console.log("审核结果", status, media);
@@ -668,7 +930,7 @@ export async function editMedia(
                 notification: !!appConfig.get("notification")?.task?.mediaStatusCheck?.length,
                 removeOriginAfterUploadCheck:
                   extraOptions?.afterUploadDeletAction === "deleteAfterCheck",
-                files: filePath.map((item) => (typeof item === "string" ? item : item.path)),
+                files: videos.map((video) => video.path),
                 uid: uid,
                 aid: aid,
               },
@@ -679,9 +941,9 @@ export async function editMedia(
         }
         // 处理上传后操作
         if (extraOptions?.afterUploadDeletAction === "delete") {
-          for (const item of filePath) {
+          for (const video of videos) {
             try {
-              trashItem(typeof item === "string" ? item : item.path);
+              trashItem(video.path);
             } catch (error) {
               log.error("删除源文件失败", error);
             }
@@ -693,11 +955,7 @@ export async function editMedia(
 
   const config = appConfig.getAll();
   const uploadOptions = config.biliUpload;
-  for (const item of filePath) {
-    const part = {
-      path: typeof item === "string" ? item : item.path,
-      title: typeof item === "string" ? path.parse(item).name : item.title,
-    };
+  for (const part of videos) {
     const uploader = new WebVideoUploader(part, client.auth, formatMediaOptions(uploadOptions));
 
     const task = new BiliPartVideoTask(
@@ -706,6 +964,7 @@ export async function editMedia(
         name: `上传视频：${part.title}(${path.parse(part.path).base})`,
         pid: pTask.taskId,
         limitTime: extraOptions?.limitedUploadTime ?? [],
+        uid: pTask.uid,
       },
       {},
     );
@@ -744,6 +1003,7 @@ export function addExtraVideoTask(pTaskId: string, filePath: string, partName: s
       name: `上传视频：${part.title}(${path.parse(part.path).base})`,
       pid: pTask.taskId,
       limitTime: [],
+      uid: pTask.uid,
     },
     {},
   );
@@ -763,6 +1023,9 @@ async function editVideoPartName(taskId: string, partName: string) {
   if (task.type !== "biliUpload") {
     throw new Error("不支持的任务类型");
   }
+  if (!task.command) {
+    throw new Error("任务已结束");
+  }
   task.command.title = partName;
   task.name = `上传视频：${partName}(${path.parse(task.command.filePath).base})`;
 }
@@ -780,7 +1043,10 @@ async function queryVideoStatus(taskId: string) {
   }
   const client = createClient(task.uid);
   const res = await client.platform.getArchive({ aid: Number(task.output) });
-  return res;
+  return {
+    state: res.archive.state,
+    state_desc: res.archive.state_desc,
+  };
 }
 
 async function getSessionId(
@@ -821,32 +1087,14 @@ async function getPlatformArchiveDetail(aid: number, uid: number) {
   return client.platform.getArchive({ aid });
 }
 
-/**
- * 获取投稿分区
- */
-async function getPlatformPre(uid: number) {
-  const client = createClient(uid);
-  return client.platform.getArchivePre();
-}
-
-/**
- * 获取分区简介信息
- */
-async function getTypeDesc(tid: number, uid: number) {
-  const client = createClient(uid);
-  return client.platform.getTypeDesc(tid);
-}
-
 // 验证配置
 export const validateBiliupConfig = (config: BiliupConfig): [boolean, string | null] => {
-  let msg: string | undefined = undefined;
+  let msg: string | null = null;
   if (!config.title) {
     msg = "标题不能为空";
   }
   if (config.copyright === 2) {
-    if (!config.source) {
-      msg = "转载来源不能为空";
-    } else {
+    if (config.source) {
       if (config.source.length > 200) {
         msg = "转载来源不能超过200个字符";
       }
@@ -854,9 +1102,13 @@ export const validateBiliupConfig = (config: BiliupConfig): [boolean, string | n
     if (config.topic_name) {
       msg = "转载类型稿件不支持活动参加哦~";
     }
+  } else if (config.copyright === 3) {
+    if (!config.creationStatement) {
+      msg = "必须选择一个创作声明";
+    }
   }
   if (config.tag.length === 0) {
-    msg = "标签不能为空";
+    msg = "标签至少存在一个";
   }
   if (config.tag.length > 10) {
     msg = "标签不能超过10个";
@@ -998,7 +1250,7 @@ export const getCookie = (uid: number) => {
 };
 
 // 检查b站账号有效期
-export const checkAccountLoop = () => {
+export const checkBiliAccountLoop = () => {
   const canAutoCheck = appConfig.get("biliUpload")?.accountAutoCheck ?? false;
   let interval = 24 * 60 * 60 * 1000;
   try {
@@ -1024,7 +1276,7 @@ export const checkAccountLoop = () => {
     console.log("检查授权失败", e);
   } finally {
     // 24小时检查一次
-    setTimeout(checkAccountLoop, interval);
+    setTimeout(checkBiliAccountLoop, interval);
   }
 };
 
@@ -1046,6 +1298,102 @@ export async function getBuvidConf(): Promise<{
   return res.data;
 }
 
+/**
+ * 获取预约列表
+ */
+async function getReserveList(uid: number) {
+  const cookie = getCookie(uid);
+  const cookieStr = Object.entries(cookie)
+    .map(([k, v]) => `${k}=${v}`)
+    .join("; ");
+  const res = await axios.get("https://member.bilibili.com/x/vupre/web/archive/pre", {
+    headers: {
+      Cookie: cookieStr,
+      Referer: "https://member.bilibili.com/platform/upload/video/frame",
+      "User-Agent":
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    },
+  });
+  return res.data;
+}
+
+// 搜索联合投稿UP主
+export async function searchStaffUser(uid: number, kw: string) {
+  try {
+    const cookie = getCookie(uid);
+    const cookieStr = Object.entries(cookie)
+      .map(([k, v]) => `${k}=${v}`)
+      .join("; ");
+    const res = await axios.get("https://member.bilibili.com/x/web/staff/user/search", {
+      params: { kw, t: Date.now() },
+      headers: {
+        Cookie: cookieStr,
+        Referer: "https://member.bilibili.com/platform/upload/video/frame",
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+      },
+    });
+    return res.data;
+  } catch (e: any) {
+    log.error("搜索联合投稿UP主失败", e?.message);
+    return { data: { users: [] } };
+  }
+}
+
+// 获取联合投稿剩余次数
+export async function getStaffRemaining(uid: number) {
+  try {
+    const cookie = getCookie(uid);
+    const cookieStr = Object.entries(cookie)
+      .map(([k, v]) => `${k}=${v}`)
+      .join("; ");
+    const res = await axios.get("https://member.bilibili.com/x/vupre/web/archive/pre", {
+      params: { lang: "cn", t: Date.now() },
+      headers: {
+        Cookie: cookieStr,
+        Referer: "https://member.bilibili.com/platform/upload/video/frame",
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+      },
+    });
+    const body = res.data;
+    const cntRemaining = body?.data?.myinfo?.staff_qualification?.cnt_remaining;
+    const tips = body?.data?.myinfo?.staff_qualification_v2?.tips?.cnt_remaining_tips;
+    // 从接口返回数据中提取职位选项
+    // 正确字段名: data.common_staff_conf.titles (字符串数组)
+    // 备用字段名: data.staff_activity_conf.titles / data.staff_conf.titles (对象数组)
+    let staffTitles: any[] = [];
+    const commonTitles = body?.data?.common_staff_conf?.titles;
+    if (Array.isArray(commonTitles) && commonTitles.length > 0) {
+      // common_staff_conf.titles 是字符串数组，直接用
+      staffTitles = commonTitles;
+    } else {
+      // 备用：staff_activity_conf.titles 或 staff_conf.titles 是对象数组，提取 name
+      const activityTitles = body?.data?.staff_activity_conf?.titles;
+      const confTitles = body?.data?.staff_conf?.titles;
+      const titlesArr = Array.isArray(activityTitles)
+        ? activityTitles
+        : Array.isArray(confTitles)
+          ? confTitles
+          : [];
+      if (titlesArr.length > 0 && typeof titlesArr[0] === "object") {
+        staffTitles = titlesArr.map((item: any) => item.name || item.translate_name || item);
+      }
+    }
+    const staffEnabled = body?.data?.myinfo?.staff_qualification_v2?.staff_auth;
+
+    return {
+      cnt_remaining: cntRemaining ?? -1,
+      tips: typeof tips === "string" ? tips : "",
+      staff_titles: staffTitles,
+      enabled: Boolean(staffEnabled),
+    };
+  } catch (e: any) {
+    log.error("获取联合投稿剩余次数失败", e?.message);
+    return { cnt_remaining: -1, tips: "", staff_titles: [], enabled: false };
+  }
+}
+
 export const biliApi = {
   getArchives,
   checkTag,
@@ -1056,9 +1404,10 @@ export const biliApi = {
   addMedia,
   editMedia,
   getSeasonList,
+  getReserveList,
+  searchStaffUser,
+  getStaffRemaining,
   getArchiveDetail,
-  getPlatformPre,
-  getTypeDesc,
   download,
   getSessionId,
   getPlatformArchiveDetail,
@@ -1079,6 +1428,8 @@ export const biliApi = {
   editVideoPartName,
   queryVideoStatus,
   getPlayUrl,
+  readUser,
+  writeUser,
 };
 
 export default biliApi;

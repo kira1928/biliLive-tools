@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 
-import { defaultsDeep, get, cloneDeep } from "lodash-es";
+import { defaultsDeep, get, set, cloneDeep } from "lodash-es";
 import { TypedEmitter } from "tiny-typed-emitter";
 import { APP_DEFAULT_CONFIG } from "./enum.js";
 import log from "./utils/log.js";
@@ -11,7 +11,7 @@ import type { AppConfig as AppConfigType, DeepPartial } from "@biliLive-tools/ty
 
 interface ConfigEvents {
   /** 更新配置时触发 */
-  update: (newData: any, oldData: any) => void;
+  update: (newData: any, oldData: any, key: string | number | null) => void;
 }
 
 export default class Config extends TypedEmitter<ConfigEvents> {
@@ -27,19 +27,19 @@ export default class Config extends TypedEmitter<ConfigEvents> {
   set(key: string | number, value: any) {
     this.read();
     const oldData = cloneDeep(this.data);
-    this.data[key] = value;
+    set(this.data, key, value);
     this.save();
-    this.emit("update", this.data, oldData);
+    this.emit("update", this.data, oldData, key);
   }
   setAll(data: { [propName: string]: any }) {
     const oldData = this.read();
     this.data = data;
     this.save();
-    this.emit("update", this.data, oldData);
+    this.emit("update", this.data, oldData, null);
   }
   get(key: string | number) {
     this.read();
-    return this.data[key];
+    return get(this.data, key);
   }
   save() {
     // 保存文件
@@ -107,14 +107,22 @@ export class AppConfig extends Config {
     const initData = defaultsDeep(data, APP_DEFAULT_CONFIG);
     super.init(filepath, initData);
   }
-  get<K extends keyof AppConfigType>(key: K): AppConfigType[K] {
+  /** withCache 为 true 时读取内存缓存，默认重新读取文件并刷新缓存。 */
+  get<K extends keyof AppConfigType>(key: K, withCache?: boolean): AppConfigType[K];
+  get<TPath extends string>(key: TPath, withCache?: boolean): ReturnType<typeof get>;
+  get(key: keyof AppConfigType | string, withCache = false) {
+    if (withCache) {
+      return get(this.data, key);
+    }
     return super.get(key);
   }
   // 使用lodash的get方法，保留type
   getDeep<TPath extends string>(path: TPath): ReturnType<typeof get> {
     return get(this.data, path);
   }
-  set<K extends keyof AppConfigType>(key: K, value: AppConfigType[K]) {
+  set<K extends keyof AppConfigType>(key: K, value: AppConfigType[K]): void;
+  set(key: string, value: any): void;
+  set(key: keyof AppConfigType | string, value: any) {
     return super.set(key, value);
   }
   setAll(newConfig: AppConfigType) {

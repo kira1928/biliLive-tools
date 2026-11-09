@@ -1,5 +1,5 @@
 <template>
-  <n-form ref="formRef" label-width="130px" label-placement="left" label-align="right">
+  <n-form ref="formRef" :label-width="labelWidth" label-placement="left" label-align="right">
     <n-form-item>
       <template #label>
         <Tip text="预设"> 修改编码器时优先从预设中修改，不同的预设会有不同的默认参数 </Tip>
@@ -41,6 +41,7 @@
           <p>AMF 是 AMD 的硬件加速</p>
           <p>H264泛用性较高，压缩率较低；H265 压缩率高于H264但可能低于AV1</p>
           <p>AV1 新一代的编码宠儿，需要新一代硬件才可硬件加速，如40系显卡</p>
+          <p>如果是 apple 专用编码，请使用相关专业编码，AV1 需要ffmpeg8.0及以上</p>
           <p>copy为复制原始流，不做任何更改，<b>如果你需要压制弹幕请不要使用这个参数</b></p>
         </n-popover>
       </template>
@@ -135,6 +136,22 @@
           placeholder="请选择预设"
         />
       </n-form-item>
+      <n-form-item>
+        <template #label>
+          <Tip text="帧率">
+            使用 fps 滤镜控制输出帧率，留空时不生效。<br />
+            一般用于电台等帧率极低的视频，来避免滚动弹幕时出现卡顿
+          </Tip>
+        </template>
+        <n-input-number
+          v-model:value.number="ffmpegOptions.config.fps"
+          class="input-number"
+          :min="0.01"
+          :step="1"
+          placeholder="留空则不生效"
+          style="width: 120px; flex: none"
+        />
+      </n-form-item>
       <n-form-item v-if="['libsvtav1'].includes(ffmpegOptions.config.encoder)">
         <template #label>
           <Tip text="10bit">
@@ -170,7 +187,7 @@
               在webhook使用时转码时进行分辨率检测，只会存在多个分辨率时才会进行转码（不针对弹幕）。<br />
               如果你不知道分辨率如何设置，可以尝试设置为1920*1080，如果你在使用cpu转码，推荐码率控制使用crf，并设置在23或更大，再根据配置调整
               preset 参数。
-              <bold>如果没有相关需求，请不要开启</bold>
+              <b>如果没有相关需求，请不要开启</b>
             </p>
           </Tip>
         </template>
@@ -265,6 +282,7 @@
             label-align="right"
             :show-feedback="false"
             label-width="40px"
+            style="flex-wrap: wrap"
           >
             <n-form-item label="x轴">
               <n-input-number
@@ -300,10 +318,9 @@
                 style="width: 120px"
               />
             </n-form-item>
-            <n-form-item label="字体颜色">
+            <n-form-item label="字体颜色" style="width: 120px">
               <n-color-picker
                 v-model:value="ffmpegOptions.config.timestampFontColor"
-                style="width: 120px"
                 title="字体颜色"
               />
             </n-form-item>
@@ -367,20 +384,14 @@
 
     <n-form-item>
       <template #label>
-        <n-popover trigger="hover">
-          <template #trigger>
-            <span
-              class="flex align-center"
-              :style="{
-                'justify-content': 'flex-end',
-              }"
-            >
-              音频编码器</span
-            >
-          </template>
-        </n-popover>
+        <Tip text="音频编码器"> 你也可以不选，在输出参数中完全自定义 </Tip>
       </template>
-      <n-select v-model:value="ffmpegOptions.config.audioCodec" :options="audioEncoders" />
+      <n-select
+        v-model:value="ffmpegOptions.config.audioCodec"
+        :options="audioEncoders"
+        clearable
+        placeholder="请选择音频编码器"
+      />
     </n-form-item>
 
     <n-form-item v-if="ffmpegOptions.config.encoder !== 'copy'">
@@ -453,7 +464,7 @@
 
 <script setup lang="ts">
 import { HelpCircleOutline } from "@vicons/ionicons5";
-import { useConfirm } from "@renderer/hooks";
+import { useConfirm, useBreakpoints } from "@renderer/hooks";
 import { uuid } from "@renderer/utils";
 import { cloneDeep } from "lodash-es";
 import { useFfmpegPreset, useAppConfig } from "@renderer/stores";
@@ -466,6 +477,10 @@ const notice = useNotification();
 const confirmDialog = useConfirm();
 const { ffmpegOptions: options } = storeToRefs(useFfmpegPreset());
 const { getPresetOptions } = useFfmpegPreset();
+const { isMobile } = useBreakpoints();
+const labelWidth = computed(() => {
+  return isMobile.value ? "90px" : "120px";
+});
 
 const emits = defineEmits<{
   (event: "change", value: FfmpegPreset): void;

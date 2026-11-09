@@ -5,7 +5,7 @@ import {
   genRecorderUUID,
   genRecordUUID,
   utils,
-  createBaseRecorder,
+  createDownloader,
 } from "@bililive-tools/manager";
 import type {
   Comment,
@@ -15,14 +15,13 @@ import type {
   RecorderCreateOpts,
   RecorderProvider,
   RecordHandle,
+  VideoFileCreatedPayload,
 } from "@bililive-tools/manager";
+import { DouyuParser } from "@bililive-tools/stream-get";
 
 import { getInfo, getStream } from "./stream.js";
-import { getRoomInfo } from "./dy_api.js";
-import { ensureFolderExist } from "./utils.js";
 import { createDYClient } from "./dy_client/index.js";
 import { giftMap, colorTab } from "./danma.js";
-import { requester } from "./requester.js";
 
 function createRecorder(opts: RecorderCreateOpts): Recorder {
   // 内部实现时，应该只有 proxy 包裹的那一层会使用这个 recorder 标识符，不应该有直接通过
@@ -33,13 +32,15 @@ function createRecorder(opts: RecorderCreateOpts): Recorder {
     // @ts-ignore
     ...mitt(),
     ...opts,
+    cache: null as any,
+    appendTimeline: null as any,
 
     availableStreams: [],
     availableSources: [],
-    qualityMaxRetry: opts.qualityRetry ?? 0,
     qualityRetry: opts.qualityRetry ?? 0,
     useServerTimestamp: opts.useServerTimestamp ?? true,
     state: "idle",
+    codecName: opts.codecName ?? "auto",
 
     getChannelURL() {
       return `https://www.douyu.com/${this.channelId}`;
@@ -62,6 +63,13 @@ function createRecorder(opts: RecorderCreateOpts): Recorder {
       const res = await getStream({
         channelId: this.channelId,
         quality: this.quality,
+        source: this.source,
+        strictQuality: false,
+        onlyAudio: this.onlyAudio,
+        avoidEdgeCDN: true,
+        codecName: this.codecName,
+        api: this.api,
+        auth: this.auth,
       });
       return res.currentStream;
     },
@@ -82,14 +90,7 @@ function createRecorder(opts: RecorderCreateOpts): Recorder {
   return recorderWithSupportUpdatedEvent;
 }
 
-const ffmpegOutputOptions: string[] = [
-  "-c",
-  "copy",
-  "-movflags",
-  "faststart+frag_keyframe+empty_moov",
-  "-min_frag_duration",
-  "10000000",
-];
+const ffmpegOutputOptions: string[] = [];
 
 const checkLiveStatusAndRecord: Recorder["checkLiveStatusAndRecord"] = async function ({
   getSavePath,
@@ -98,53 +99,9 @@ const checkLiveStatusAndRecord: Recorder["checkLiveStatusAndRecord"] = async fun
 }) {
   // 如果已经在录制中，只在需要检查标题关键词时才获取最新信息
   if (this.recordHandle != null) {
-    // 只有当设置了标题关键词时，并且不是手动启动的录制，才获取最新的直播间信息
-    if (
-      !isManualStart &&
-      this.titleKeywords &&
-      typeof this.titleKeywords === "string" &&
-      this.titleKeywords.trim()
-    ) {
-      const now = Date.now();
-      // 每5分钟检查一次标题变化
-      const titleCheckInterval = 5 * 60 * 1000; // 5分钟
-
-      // 获取上次检查时间
-      const lastCheckTime =
-        typeof this.extra.lastTitleCheckTime === "number" ? this.extra.lastTitleCheckTime : 0;
-
-      // 如果距离上次检查时间不足指定间隔，则跳过检查
-      if (now - lastCheckTime < titleCheckInterval) {
-        return this.recordHandle;
-      }
-
-      // 更新检查时间
-      this.extra.lastTitleCheckTime = now;
-
-      // 获取直播间信息
-      const liveInfo = await getInfo(this.channelId);
-      const { title } = liveInfo;
-
-      // 检查标题是否包含关键词
-      const keywords = this.titleKeywords
-        .split(",")
-        .map((k) => k.trim())
-        .filter((k) => k);
-      const hasTitleKeyword = keywords.some((keyword) =>
-        title.toLowerCase().includes(keyword.toLowerCase()),
-      );
-
-      if (hasTitleKeyword) {
-        this.emit("DebugLog", {
-          type: "common",
-          text: `检测到标题包含关键词，停止录制：直播间标题 "${title}" 包含关键词 "${this.titleKeywords}"`,
-        });
-
-        // 停止录制
-        await this.recordHandle.stop("直播间标题包含关键词");
-        // 返回 null，停止录制
-        return null;
-      }
+    const shouldStop = await utils.checkTitleKeywordsWhileRecording(this, isManualStart, getInfo);
+    if (shouldStop) {
+      return null;
     }
 
     // 已经在录制中，直接返回
@@ -155,12 +112,15 @@ const checkLiveStatusAndRecord: Recorder["checkLiveStatusAndRecord"] = async fun
   try {
     const liveInfo = await getInfo(this.channelId);
     this.liveInfo = liveInfo;
-    this.state = "idle";
+    this.emit("stateChange", { state: "idle" });
   } catch (error) {
-    this.state = "check-error";
+    this.emit("stateChange", {
+      state: "check-error",
+      msg: `检查失败，` + (error instanceof Error ? error.message : String(error)),
+    });
     throw error;
   }
-  const { living, owner, title } = this.liveInfo;
+  const { living, owner, title, liveStartTime, recordStartTime } = this.liveInfo;
 
   if (this.liveInfo.liveId === banLiveId) {
     this.tempStopIntervalCheck = true;
@@ -170,60 +130,40 @@ const checkLiveStatusAndRecord: Recorder["checkLiveStatusAndRecord"] = async fun
   if (this.tempStopIntervalCheck) return null;
   if (!living) return null;
 
-  // 检查标题是否包含关键词，如果包含则不自动录制
-  // 手动开始录制时不检查标题关键词
-  if (
-    !isManualStart &&
-    this.titleKeywords &&
-    typeof this.titleKeywords === "string" &&
-    this.titleKeywords.trim()
-  ) {
-    const keywords = this.titleKeywords
-      .split(",")
-      .map((k) => k.trim())
-      .filter((k) => k);
-    const hasTitleKeyword = keywords.some((keyword) =>
-      title.toLowerCase().includes(keyword.toLowerCase()),
-    );
-    if (hasTitleKeyword) {
-      this.emit("DebugLog", {
-        type: "common",
-        text: `跳过录制：直播间标题 "${title}" 包含关键词 "${this.titleKeywords}"`,
-      });
-      return null;
-    }
-  }
+  // 检查标题是否包含关键词
+  console.log("检查标题关键词", { title, channelId: this.channelId, isManualStart });
+  if (utils.checkTitleKeywordsBeforeRecord(title, this, isManualStart)) return null;
 
-  let recorderType: Parameters<typeof createBaseRecorder>[0] =
-    this.recorderType === "mesio" ? "mesio" : "ffmpeg";
+  const qualityRetryLeft = (await this.cache.get("qualityRetryLeft")) ?? this.qualityRetry;
+  const strictQuality = utils.shouldUseStrictQuality(
+    qualityRetryLeft,
+    this.qualityRetry,
+    isManualStart,
+  );
+
   let res: Awaited<ReturnType<typeof getStream>>;
   try {
-    let strictQuality = false;
-    if (this.qualityRetry > 0) {
-      strictQuality = true;
-    }
-    if (this.qualityMaxRetry < 0) {
-      strictQuality = true;
-    }
-    if (isManualStart) {
-      strictQuality = false;
-    }
     res = await getStream({
       channelId: this.channelId,
       quality: this.quality,
       source: this.source,
       strictQuality,
       onlyAudio: this.onlyAudio,
-      avoidEdgeCDN: recorderType === "mesio",
+      avoidEdgeCDN: true,
+      codecName: this.codecName,
+      api: this.api,
+      auth: this.auth || "",
     });
   } catch (err) {
-    if (this.qualityRetry > 0) this.qualityRetry -= 1;
-
-    this.state = "check-error";
+    if (qualityRetryLeft > 0) await this.cache.set("qualityRetryLeft", qualityRetryLeft - 1);
+    this.emit("stateChange", {
+      state: "check-error",
+      msg: `检查失败，` + (err instanceof Error ? err.message : String(err)),
+    });
     throw err;
   }
 
-  this.state = "recording";
+  this.emit("stateChange", { state: "recording" });
   const { currentStream: stream, sources: availableSources, streams: availableStreams } = res;
   this.availableStreams = availableStreams.map((s) => s.name);
   this.availableSources = availableSources.map((s) => s.name);
@@ -231,10 +171,6 @@ const checkLiveStatusAndRecord: Recorder["checkLiveStatusAndRecord"] = async fun
   this.usedSource = stream.source;
 
   const onEnd = (...args: unknown[]) => {
-    if (isCutting) {
-      isCutting = false;
-      return;
-    }
     if (isEnded) return;
     isEnded = true;
 
@@ -246,19 +182,28 @@ const checkLiveStatusAndRecord: Recorder["checkLiveStatusAndRecord"] = async fun
     this.recordHandle?.stop(reason);
   };
   let isEnded = false;
-  let isCutting = false;
 
-  const recorder = createBaseRecorder(
-    recorderType,
+  const downloader = createDownloader(
+    this.recorderType,
     {
       url: stream.url,
       // @ts-ignore
       outputOptions: ffmpegOutputOptions,
       segment: this.segment ?? 0,
       getSavePath: (opts) =>
-        getSavePath({ owner, title: opts.title ?? title, startTime: opts.startTime }),
+        getSavePath({
+          owner,
+          title: opts.title ?? title,
+          startTime: opts.startTime,
+          liveStartTime,
+          recordStartTime,
+          extraMs: opts.extraMs,
+        }),
       disableDanma: this.disableProvideCommentsWhenRecording,
       videoFormat: this.videoFormat ?? "auto",
+      debugLevel: this.debugLevel ?? "none",
+      onlyAudio: stream.onlyAudio,
+      proxy: this.proxy,
     },
     onEnd,
     async () => {
@@ -267,20 +212,13 @@ const checkLiveStatusAndRecord: Recorder["checkLiveStatusAndRecord"] = async fun
     },
   );
 
-  const savePath = getSavePath({
-    owner,
+  const handleVideoCreated = async ({
+    filename,
     title,
-  });
-
-  try {
-    ensureFolderExist(savePath);
-  } catch (err) {
-    this.state = "idle";
-    throw err;
-  }
-
-  const handleVideoCreated = async ({ filename, title, cover }) => {
-    this.emit("videoFileCreated", { filename, cover });
+    cover,
+    rawFilename,
+  }: VideoFileCreatedPayload) => {
+    this.emit("videoFileCreated", { filename, cover, rawFilename });
 
     if (title && this?.liveInfo) {
       this.liveInfo.title = title;
@@ -288,24 +226,24 @@ const checkLiveStatusAndRecord: Recorder["checkLiveStatusAndRecord"] = async fun
     if (cover && this?.liveInfo) {
       this.liveInfo.cover = cover;
     }
-    const extraDataController = recorder.getExtraDataController();
+    const extraDataController = downloader.getExtraDataController();
     extraDataController?.setMeta({
       room_id: this.channelId,
       platform: provider?.id,
-      liveStartTimestamp: this?.liveInfo?.startTime?.getTime(),
+      liveStartTimestamp: this?.liveInfo?.liveStartTime?.getTime(),
       // recordStopTimestamp: Date.now(),
       title: title,
       user_name: owner,
     });
   };
-  recorder.on("videoFileCreated", handleVideoCreated);
-  recorder.on("videoFileCompleted", ({ filename }) => {
-    this.emit("videoFileCompleted", { filename });
+  downloader.on("videoFileCreated", handleVideoCreated);
+  downloader.on("videoFileCompleted", (data) => {
+    this.emit("videoFileCompleted", data);
   });
-  recorder.on("DebugLog", (data) => {
+  downloader.on("DebugLog", (data) => {
     this.emit("DebugLog", data);
   });
-  recorder.on("progress", (progress) => {
+  downloader.on("progress", (progress) => {
     if (this.recordHandle) {
       this.recordHandle.progress = progress;
     }
@@ -316,16 +254,17 @@ const checkLiveStatusAndRecord: Recorder["checkLiveStatusAndRecord"] = async fun
     notAutoStart: true,
   });
   client.on("message", (msg) => {
-    const extraDataController = recorder.getExtraDataController();
+    const extraDataController = downloader.getExtraDataController();
     if (!extraDataController) return;
     switch (msg.type) {
       case "chatmsg": {
-        const timestamp = this.useServerTimestamp ? Number(msg.cst) : Date.now();
+        // 某些情况下cst不存在，可能是其他平台发送的弹幕？
+        const timestamp = this.useServerTimestamp && msg.cst ? Number(msg.cst) : Date.now();
         const comment: Comment = {
           type: "comment",
           timestamp: timestamp,
           text: msg.txt,
-          color: colorTab[msg.col] ?? "#ffffff",
+          color: colorTab[String(msg.col)] ?? "#ffffff",
           sender: {
             uid: msg.uid,
             name: msg.nn,
@@ -444,37 +383,45 @@ const checkLiveStatusAndRecord: Recorder["checkLiveStatusAndRecord"] = async fun
     }
   });
   client.on("error", (err) => {
+    this.appendTimeline({ text: `弹幕连接发生错误: ${String(err)}` });
     this.emit("DebugLog", { type: "common", text: String(err) });
+  });
+  client.on("start", () => {
+    this.appendTimeline({ text: "弹幕连接已建立" });
+    this.emit("DebugLog", { type: "common", text: "弹幕连接已建立" });
+  });
+  client.on("reconnect", ({ retryCount, maxRetry }) => {
+    this.appendTimeline({
+      text: `弹幕连接已断开，正在尝试重连... (重试次数: ${retryCount}/${maxRetry})`,
+    });
+    this.emit("DebugLog", {
+      type: "common",
+      text: `弹幕连接已断开，正在尝试重连... (重试次数: ${retryCount}/${maxRetry})`,
+    });
   });
   if (!this.disableProvideCommentsWhenRecording) {
     client.start();
   }
 
-  const ffmpegArgs = recorder.getArguments();
-  recorder.run();
-
-  // TODO: 需要一个机制防止空录制，比如检查文件的大小变化、ffmpeg 的输出、直播状态等
+  const downloaderArgs = downloader.getArguments();
+  downloader.run();
 
   const cut = utils.singleton<RecordHandle["cut"]>(async () => {
     if (!this.recordHandle) return;
-    if (isCutting) return;
-    isCutting = true;
-    await recorder.stop();
-    recorder.createCommand();
-    recorder.run();
+    downloader.cut();
   });
 
   const stop = utils.singleton<RecordHandle["stop"]>(async (reason?: string) => {
     if (!this.recordHandle) return;
-    this.state = "stopping-record";
+    this.emit("stateChange", { state: "stopping-record" });
 
     try {
       client.stop();
-      await recorder.stop();
+      await downloader.stop();
     } catch (err) {
       this.emit("DebugLog", {
         type: "common",
-        text: `stop ffmpeg error: ${String(err)}`,
+        text: `stop record error: ${String(err)}`,
       });
     }
     this.usedStream = undefined;
@@ -482,17 +429,18 @@ const checkLiveStatusAndRecord: Recorder["checkLiveStatusAndRecord"] = async fun
     this.emit("RecordStop", { recordHandle: this.recordHandle, reason });
     this.recordHandle = undefined;
     this.liveInfo = undefined;
-    this.state = "idle";
-    this.qualityRetry = this.qualityMaxRetry;
+    this.emit("stateChange", { state: "idle" });
+    this.cache.set("qualityRetryLeft", this.qualityRetry);
   });
 
   this.recordHandle = {
     id: genRecordUUID(),
     stream: stream.name,
     source: stream.source,
+    recorderType: downloader.type,
     url: stream.url,
-    ffmpegArgs,
-    savePath: savePath,
+    downloaderArgs,
+    savePath: downloader.videoFilePath,
     stop,
     cut,
   };
@@ -513,37 +461,16 @@ export const provider: RecorderProvider<Record<string, unknown>> = {
   async resolveChannelInfoFromURL(channelURL) {
     if (!this.matchURL(channelURL)) return null;
 
-    channelURL = channelURL.trim();
-    const res = await requester.get(channelURL);
-    const html = res.data;
-
-    const matched = html.match(/\$ROOM\.room_id.?=(.*?);/);
-    let roomId: string | undefined = undefined;
-    if (matched) {
-      roomId = matched[1].trim();
-    } else {
-      // 解析出query中的rid参数
-      const rid = new URL(channelURL).searchParams.get("rid");
-      if (rid) {
-        roomId = rid;
-      } else {
-        // 解析<link rel="canonical" href="xxxxxxx"/>中的href
-        const canonicalLink = html.match(/<link rel="canonical" href="(.*?)"/);
-        if (canonicalLink) {
-          const url = canonicalLink[1];
-          roomId = url.split("/").pop();
-        }
-      }
-    }
+    const parser = new DouyuParser();
+    const roomId = await parser.extractRoomId(channelURL);
     if (!roomId) return null;
-
-    const roomInfo = await getRoomInfo(Number(roomId));
+    const roomInfo = await parser.getRoomInfo(roomId);
 
     return {
       id: roomId,
-      title: roomInfo.room.room_name,
-      owner: roomInfo.room.nickname,
-      avatar: roomInfo.room.avatar?.big,
+      title: roomInfo.title,
+      owner: roomInfo.owner,
+      avatar: roomInfo.avatar,
     };
   },
 

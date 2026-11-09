@@ -1,4 +1,4 @@
-import { getRoomInfo } from "./douyin_api.js";
+import { getRoomInfo, selectRandomAPI } from "./douyin_api.js";
 import { globalLoadBalancer } from "./loadBalancer/loadBalancer.js";
 
 import type { Recorder } from "@bililive-tools/manager";
@@ -7,45 +7,52 @@ import type { APIType, RealAPIType } from "./types.js";
 export async function getInfo(
   channelId: string,
   opts?: {
-    cookie?: string;
+    auth?: string;
     api?: APIType;
     uid?: string | number;
   },
 ): Promise<{
   living: boolean;
+  // 是否为直播电台
+  isLiveRadio: boolean;
   owner: string;
   title: string;
   roomId: string;
   avatar: string;
   cover: string;
-  startTime: Date;
   liveId: string;
   uid: string;
   api: RealAPIType;
+  liveStartTime: Date;
+  recordStartTime: Date;
+  area: string;
 }> {
   let info;
 
   // 如果使用 balance 模式，使用负载均衡器
   if (opts?.api === "balance") {
     info = await globalLoadBalancer.callWithLoadBalance(channelId, {
-      auth: opts.cookie,
+      auth: opts.auth,
       uid: opts.uid,
     });
   } else {
     info = await getRoomInfo(channelId, opts ?? {});
   }
-
+  const startTime = new Date();
   return {
     living: info.living,
+    isLiveRadio: info.isLiveRadio,
     owner: info.owner,
     title: info.title,
     roomId: info.roomId,
     avatar: info.avatar,
     cover: info.cover,
-    startTime: new Date(),
     liveId: info.liveId,
     uid: info.uid,
     api: info.api,
+    liveStartTime: startTime,
+    recordStartTime: startTime,
+    area: info.area ?? "",
   };
 }
 
@@ -53,21 +60,35 @@ export async function getStream(
   opts: Pick<Recorder, "channelId" | "quality" | "streamPriorities" | "sourcePriorities"> & {
     rejectCache?: boolean;
     strictQuality?: boolean;
-    cookie?: string;
+    auth?: string;
     formatPriorities?: Array<"flv" | "hls">;
     doubleScreen?: boolean;
     api?: APIType;
     uid?: string | number;
+    // 是否为电台直播
+    isLiveRadio?: boolean;
+    /** 优先尝试用户格式优先级中的备用格式 */
+    preferAlternativeStream?: boolean;
   },
 ) {
   let api = opts.api ?? "web";
-  if (api === "userHTML") {
+  if (api === "userHTML" || api === "webHTML") {
     // userHTML 接口只能用于状态检测
     api = "web";
+  } else if (api === "random") {
+    api = selectRandomAPI(["userHTML", "webHTML"]);
+  }
+  if (opts.isLiveRadio) {
+    // 直播电台可能需要特殊处理，优先使用 mobile 接口，某些直播间userHTML不会有数据,mobile可能更加合适
+    api = "mobile";
+    // 如果用户指定了userHTML接口，那么优先使用userHTML接口获取流信息
+    if (opts.api === "userHTML") {
+      api = "userHTML";
+    }
   }
   const info = await getRoomInfo(opts.channelId, {
     doubleScreen: opts.doubleScreen ?? true,
-    auth: opts.cookie,
+    auth: opts.auth,
     api: api,
     uid: opts.uid,
   });
@@ -77,7 +98,10 @@ export async function getStream(
 
   // 抖音为自动cdn，所以指定选择第一个
   const sources = info.sources[0];
-  const formatPriorities = opts.formatPriorities || ["flv", "hls"];
+  const formatPriorities = getFormatPriorities(
+    opts.formatPriorities || ["flv", "hls"],
+    opts.preferAlternativeStream,
+  );
 
   // 查找指定质量的流
   let targetStream = sources.streams.find((s) => s.quality === opts.quality);
@@ -109,12 +133,34 @@ export async function getStream(
     throw new Error("未找到对应的流");
   }
 
+  let onlyAudio = false;
+  try {
+    const urlObj = new URL(url);
+    if (urlObj.searchParams.get("only_audio") == "1") {
+      onlyAudio = true;
+    }
+  } catch (error) {
+    console.warn("解析流 URL 失败", error);
+  }
+
   return {
     ...info,
     currentStream: {
       name: qualityName,
       source: "自动",
-      url: url!,
+      url: url,
+      onlyAudio,
     },
   };
+}
+
+export function getFormatPriorities(
+  formatPriorities: Array<"flv" | "hls">,
+  preferAlternativeStream = false,
+): Array<"flv" | "hls"> {
+  if (!preferAlternativeStream || formatPriorities.length < 2) {
+    return [...formatPriorities];
+  }
+
+  return [formatPriorities[1], formatPriorities[0]];
 }

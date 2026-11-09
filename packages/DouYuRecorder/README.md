@@ -40,7 +40,10 @@ interface Options {
   streamPriorities: []; // 废弃
   sourcePriorities: []; // 废弃
   disableAutoCheck?: boolean; // 为 true 时 manager 将跳过自动检查
-  segment?: number; // 分段参数，单位分钟
+  api: "auto" | "newAPI" | "oldAPI"; // 仅有newAPI支持hevc
+  auth?: string; // 斗鱼 Cookie
+  codecName?: CodecName; // 见 CodecName 参数
+  segment?: number | string; // 分段参数，单位分钟，如果以"B","KB","MB","GB"结尾，会尝试使用文件大小分段，仅推荐在使用mesio录制引擎时使用
   titleKeywords?: string; // 禁止录制的标题关键字，英文逗号分开多个
   disableProvideCommentsWhenRecording?: boolean; // 禁用弹幕录制
   saveGiftDanma?: boolean; // 保存礼物弹幕
@@ -49,7 +52,8 @@ interface Options {
   saveCover?: boolean; // 保存封面
   videoFormat?: "auto"; // 视频格式： "auto", "ts", "mkv" ，auto模式下, 分段使用 "ts"，不分段使用 "mp4"
   onlyAudio?: boolean; // 只录制音频，默认为否
-  recorderType?: "auto" | "ffmpeg" | "mesio"; // 底层录制器，使用mesio时videoFormat参数无效
+  recorderType?: "auto" | "ffmpeg" | "mesio" | "bililive"; // 底层录制器，使用mesio和bililive时videoFormat参数无效
+  debugLevel?: `verbose` | "basic"; // verbose参数时，录制器会输出更加详细的log
 }
 ```
 
@@ -91,6 +95,16 @@ const { id } = await provider.resolveChannelInfoFromURL(url);
 | 线路6  | ali-h5    |
 | 线路7  | hw-h5     |
 | 线路13 | hs-h5     |
+
+### CodecName
+
+用于控制使用avc还是hevc
+
+| 解释         | 值   |
+| ------------ | ---- |
+| 等于avc      | auto |
+| 优先使用avc  | avc  |
+| 优先使用hevc | hevc |
 
 # 协议
 

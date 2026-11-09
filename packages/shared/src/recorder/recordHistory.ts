@@ -1,11 +1,12 @@
-import { streamerModel, recordHistoryModel } from "../db/index.js";
+import { streamerService, recordHistoryService } from "../db/index.js";
 
-import type { BaseLive, Live } from "../db/model/recordHistory.js";
+import type { BaseLiveHistory, LiveHistory } from "../db/model/recordHistory.js";
 import type { BaseStreamer } from "../db/model/streamer.js";
 
 export interface QueryRecordsOptions {
   room_id: string;
   platform: string;
+  liveId?: string;
   page?: number;
   pageSize?: number;
   startTime?: number;
@@ -13,7 +14,7 @@ export interface QueryRecordsOptions {
 }
 
 export interface QueryRecordsResult {
-  data: Array<Live>;
+  data: Array<LiveHistory>;
   pagination: {
     total: number;
     page: number;
@@ -21,8 +22,16 @@ export interface QueryRecordsResult {
   };
 }
 
-export function addWithStreamer(data: Omit<BaseLive, "streamer_id"> & BaseStreamer) {
-  const streamer = streamerModel.upsert({
+export interface QueryRecentClipsOptions {
+  room_id: string;
+  platform: string;
+  liveId?: string;
+  limit?: number;
+  candidateLimit?: number;
+}
+
+export function addWithStreamer(data: Omit<BaseLiveHistory, "streamer_id"> & BaseStreamer) {
+  const streamer = streamerService.upsert({
     where: {
       room_id: data.room_id,
       platform: data.platform,
@@ -35,7 +44,7 @@ export function addWithStreamer(data: Omit<BaseLive, "streamer_id"> & BaseStream
   });
   if (!streamer) return null;
 
-  const live = recordHistoryModel.add({
+  const live = recordHistoryService.add({
     title: data.title,
     streamer_id: streamer.id,
     live_start_time: data.live_start_time,
@@ -51,13 +60,16 @@ export function upadteLive(
   params: {
     record_end_time?: number;
     video_duration?: number;
+    video_filename?: string;
     danma_num?: number;
     interact_num?: number;
+    danma_stats_json?: string;
+    quick_hash?: string;
   },
 ) {
-  const live = recordHistoryModel.query({ video_file: query.video_file, live_id: query.live_id });
+  const live = recordHistoryService.query({ video_file: query.video_file, live_id: query.live_id });
   if (live) {
-    recordHistoryModel.update({
+    recordHistoryService.update({
       id: live.id,
       ...params,
     });
@@ -71,10 +83,10 @@ export function upadteLive(
 }
 
 export function queryRecordsByRoomAndPlatform(options: QueryRecordsOptions): QueryRecordsResult {
-  const { room_id, platform, page = 1, pageSize = 100, startTime, endTime } = options;
+  const { room_id, platform, liveId, page = 1, pageSize = 100, startTime, endTime } = options;
 
   // 先查询streamer
-  const streamer = streamerModel.query({ room_id, platform });
+  const streamer = streamerService.query({ room_id, platform });
   if (!streamer) {
     return {
       data: [],
@@ -87,8 +99,11 @@ export function queryRecordsByRoomAndPlatform(options: QueryRecordsOptions): Que
   }
 
   // 使用数据库分页而不是内存分页
-  const result = recordHistoryModel.paginate({
-    where: { streamer_id: streamer.id },
+  const result = recordHistoryService.paginate({
+    where: {
+      streamer_id: streamer.id,
+      ...(liveId ? { live_id: liveId } : {}),
+    },
     page,
     pageSize,
     startTime,
@@ -107,38 +122,113 @@ export function queryRecordsByRoomAndPlatform(options: QueryRecordsOptions): Que
   };
 }
 
+export function queryRecentClipsByRoomAndPlatform(options: QueryRecentClipsOptions): LiveHistory[] {
+  const { room_id, platform, liveId, candidateLimit = 15 } = options;
+
+  const streamer = streamerService.query({ room_id, platform });
+  if (!streamer) {
+    return [];
+  }
+
+  const result = recordHistoryService.paginate({
+    where: {
+      streamer_id: streamer.id,
+      ...(liveId ? { live_id: liveId } : {}),
+    },
+    page: 1,
+    pageSize: candidateLimit,
+    orderBy: "record_start_time",
+    orderDirection: "DESC",
+  });
+
+  return result.data;
+}
+
 export async function removeRecords(channelId: string, providerId: string) {
   // 查找主播ID
-  const streamer = streamerModel.query({
+  const streamer = streamerService.query({
     room_id: channelId,
     platform: providerId,
   });
   if (!streamer) throw new Error("没有找到stream");
 
-  recordHistoryModel.removeRecordsByStreamerId(streamer.id);
+  recordHistoryService.removeRecordsByStreamerId(streamer.id);
 
   return true;
 }
 
 export function getRecord(data: { file: string; live_id?: string }) {
-  return recordHistoryModel.query({ video_file: data.file, live_id: data.live_id });
+  return recordHistoryService.query({ video_file: data.file, live_id: data.live_id });
 }
 
 export function getRecordById(id: number) {
-  return recordHistoryModel.query({ id });
+  return recordHistoryService.query({ id });
 }
 
 export function removeRecord(id: number): boolean {
-  const deletedCount = recordHistoryModel.removeRecord(id);
+  const deletedCount = recordHistoryService.removeRecord(id);
   return deletedCount > 0;
+}
+
+/**
+ * 批量获取多个频道的最后录制时间
+ * @param channels 频道信息数组
+ * @returns 包含频道ID和最后录制时间的数组
+ */
+export function getLastRecordTimesByChannels(
+  channels: Array<{ channelId: string; providerId: string }>,
+): Array<{
+  channelId: string;
+  providerId: string;
+  lastRecordTime: number | null;
+}> {
+  if (channels.length === 0) {
+    return [];
+  }
+
+  // 批量查询所有streamer（一次数据库查询）
+  const streamers = streamerService.batchQueryByChannels(
+    channels.map(({ channelId, providerId }) => ({
+      room_id: channelId,
+      platform: providerId,
+    })),
+  );
+
+  if (streamers.length === 0) {
+    return channels.map(({ channelId, providerId }) => ({
+      channelId,
+      providerId,
+      lastRecordTime: null,
+    }));
+  }
+
+  // 批量查询最后录制时间（一次数据库查询）
+  const streamerIds = streamers.map((s) => s.id);
+  const lastRecordTimesMap = recordHistoryService.getLastRecordTimes(streamerIds);
+
+  // 构建 streamer 映射表
+  const streamerMap = new Map(streamers.map((s) => [`${s.platform}_${s.room_id}`, s.id]));
+
+  return channels.map(({ channelId, providerId }) => {
+    const streamerId = streamerMap.get(`${providerId}_${channelId}`);
+    const lastRecordTime = streamerId ? (lastRecordTimesMap.get(streamerId) ?? null) : null;
+
+    return {
+      channelId,
+      providerId,
+      lastRecordTime,
+    };
+  });
 }
 
 export default {
   addWithStreamer,
   upadteLive,
   queryRecordsByRoomAndPlatform,
+  queryRecentClipsByRoomAndPlatform,
   removeRecords,
   removeRecord,
   getRecord,
   getRecordById,
+  getLastRecordTimesByChannels,
 };

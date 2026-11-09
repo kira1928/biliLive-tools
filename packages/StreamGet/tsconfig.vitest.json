@@ -1,0 +1,16 @@
+{
+  "compilerOptions": {
+    // "composite": true,
+    "outDir": "./lib",
+    "rootDir": "./src",
+    "target": "es2023",
+    "module": "Node16",
+    "moduleResolution": "Bundler",
+    "strict": false,
+    "noEmit": true,
+    "esModuleInterop": true,
+    "declaration": false,
+    "types": ["*"],
+  },
+  "include": ["test/**/*.ts", "src/**/*.ts"],
+}

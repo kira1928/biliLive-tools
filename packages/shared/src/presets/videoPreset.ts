@@ -1,10 +1,11 @@
-import CommonPreset from "./preset.js";
+﻿import CommonPreset from "./preset.js";
 
 import type { BiliupConfig, BiliupPreset } from "@biliLive-tools/types";
 import type { GlobalConfig } from "@biliLive-tools/types";
 
 export const DEFAULT_BILIUP_CONFIG: BiliupConfig = {
   title: "",
+  seasonTitleTemplate: "{{mediaTitle}}",
   desc: "",
   dolby: 0,
   hires: 0,
@@ -16,6 +17,7 @@ export const DEFAULT_BILIUP_CONFIG: BiliupConfig = {
   dynamic: "",
   cover: "",
   noReprint: 0,
+  watermark: 0,
   openElec: 0,
   closeDanmu: 0,
   closeReply: 0,
@@ -27,6 +29,8 @@ export const DEFAULT_BILIUP_CONFIG: BiliupConfig = {
   comment: "",
   topic_name: null,
   is_only_self: 0,
+  space_hidden: 2,
+  act_reserve: undefined,
 };
 
 export class VideoPreset extends CommonPreset<BiliupConfig> {

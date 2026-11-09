@@ -1,4 +1,5 @@
 import request from "./request";
+import { configApi } from ".";
 
 import type { Task } from "@renderer/types";
 import type {
@@ -9,6 +10,7 @@ import type {
   DanmaOptions,
 } from "@biliLive-tools/types";
 import type { VideoAPI } from "@biliLive-tools/http/types/video.js";
+import type { DetectionConfig } from "music-segment-detector";
 
 /**
  * 获取任务列表
@@ -175,8 +177,27 @@ const burn = async (
   return res.data;
 };
 
+const flvRepair = async (
+  input: string,
+  output: string,
+  options: {
+    type: "bililive" | "mesio";
+    /** 支持绝对路径和相对路径 */
+    savePath?: string;
+    /** 1: 保存到原始文件夹，2：保存到特定文件夹 */
+    saveType?: 1 | 2;
+  },
+) => {
+  const res = await request.post(`/task/flvRepair`, {
+    input,
+    output,
+    options,
+  });
+  return res.data;
+};
+
 const cut = async (
-  files: { videoFilePath: string; assFilePath?: string },
+  files: { videoFilePath: string; assFilePath?: string; srtContent?: string },
   output: string,
   ffmpegOptions: FfmpegOptions,
   options: {
@@ -185,6 +206,12 @@ const cut = async (
     savePath?: string;
     /** 1: 保存到原始文件夹，2：保存到特定文件夹 */
     saveType?: 1 | 2;
+    uploadOptions?: {
+      upload: boolean;
+      config: BiliupPreset["config"] | null;
+      filePath: string;
+      uid: number | undefined;
+    };
   },
 ) => {
   const res = await request.post(`/task/cut`, {
@@ -282,6 +309,50 @@ const executeVirtualRecord = async (
   return res.data;
 };
 
+const extractPeaks = async (
+  input: string,
+): Promise<{
+  output: {
+    data: any[];
+  };
+}> => {
+  const res = await request.post(`/task/extractPeaks`, {
+    input,
+    options: {
+      sync: true,
+    },
+  });
+  return res.data;
+};
+
+const analyzerWaveform = async (
+  input: string,
+  config?: Partial<DetectionConfig>,
+): Promise<EventSource> => {
+  let key = window.localStorage.getItem("key");
+  if (!window.isWeb) {
+    const appConfig = await configApi.get();
+    key = appConfig.passKey;
+  }
+
+  const configStr = config ? encodeURIComponent(JSON.stringify(config)) : "";
+  const url = `${request.defaults.baseURL}/sse/analyzerWaveform?auth=${key}&input=${encodeURIComponent(input)}&config=${configStr}`;
+
+  const eventSource = new EventSource(url);
+  return eventSource;
+};
+
+const cutSubtitle = async (data: {
+  srtContent: string;
+  saveType: 1 | 2;
+  savePath: string;
+  videoPath: string;
+  segments: { start: number; end: number; name: string }[];
+}) => {
+  const res = await request.post(`/task/cutSubtitle`, data);
+  return res.data;
+};
+
 const task = {
   list,
   get,
@@ -310,6 +381,10 @@ const task = {
   restart,
   testVirtualRecord,
   executeVirtualRecord,
+  flvRepair,
+  extractPeaks,
+  analyzerWaveform,
+  cutSubtitle,
 };
 
 export default task;

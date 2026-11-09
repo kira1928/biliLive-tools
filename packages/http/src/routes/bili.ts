@@ -1,11 +1,17 @@
-import Router from "@koa/router";
-import { v4 as uuid } from "uuid";
+﻿import Router from "@koa/router";
 import { omit } from "lodash-es";
 
 import { biliApi, validateBiliupConfig } from "@biliLive-tools/shared/task/bili.js";
 import { TvQrcodeLogin } from "@renmu/bili-api";
-
-import type { BiliupConfig } from "@biliLive-tools/types";
+import {
+  formatTitle,
+  formatSeasonTitle,
+  formatPartTitle,
+  formatDesc,
+  uuid,
+} from "@biliLive-tools/shared/utils/index.js";
+import { appConfig } from "../index.js";
+import type { BiliupConfig, PartTitleFormatOptions } from "@biliLive-tools/types";
 
 const router = new Router({
   prefix: "/bili",
@@ -71,6 +77,11 @@ router.get("/seasons", async (ctx) => {
   const data = await biliApi.getSeasonList(uid);
   ctx.body = data;
 });
+router.get("/reserveList", async (ctx) => {
+  const { uid } = ctx.request.query as unknown as { uid: number };
+  const data = await biliApi.getReserveList(uid);
+  ctx.body = data;
+});
 router.get("/season/:aid", async (ctx) => {
   const { uid } = ctx.request.query as unknown as { uid: number };
   const { aid } = ctx.params;
@@ -81,16 +92,6 @@ router.get("/season/:aid", async (ctx) => {
 router.get("/platformArchiveDetail", async (ctx) => {
   const { aid, uid } = ctx.request.query as unknown as { aid: number; uid: number };
   const data = await biliApi.getPlatformArchiveDetail(aid, uid);
-  ctx.body = data;
-});
-router.get("/platformPre", async (ctx) => {
-  const { uid } = ctx.request.query as unknown as { uid: number };
-  const data = await biliApi.getPlatformPre(uid);
-  ctx.body = data;
-});
-router.get("/typeDesc", async (ctx) => {
-  const { tid, uid } = ctx.request.query as unknown as { tid: number; uid: number };
-  const data = await biliApi.getTypeDesc(tid, uid);
   ctx.body = data;
 });
 
@@ -127,6 +128,11 @@ router.post("/upload", async (ctx) => {
     ctx.status = 400;
     return;
   }
+  if (data.config.staffs && data.config.staffs.length > 0) {
+    if (appConfig?.get("biliUpload")?.useBCutAPI) {
+      throw new Error("联合投稿暂不支持必剪接口");
+    }
+  }
 
   if (data.vid) {
     const task = await biliApi.editMedia(data.vid as number, data.videos, data.config, data.uid, {
@@ -156,6 +162,7 @@ const loginObj: {
     res: string;
     status: "scan" | "completed" | "error";
     failReason: string;
+    uid?: number;
   };
 } = {};
 router.post("/login", async (ctx) => {
@@ -180,10 +187,15 @@ router.post("/login", async (ctx) => {
   });
   tv.on("completed", async (res) => {
     loginObj[id].res = JSON.stringify(res);
-    loginObj[id].status = "completed";
-
-    const data = res.data;
-    await biliApi.addUser(data);
+    try {
+      const data = res.data;
+      await biliApi.addUser(data);
+      loginObj[id].uid = data.mid;
+      loginObj[id].status = "completed";
+    } catch (error) {
+      loginObj[id].failReason = error instanceof Error ? error.message : String(error);
+      loginObj[id].status = "error";
+    }
   });
   const url = await tv.login();
 
@@ -226,6 +238,93 @@ router.get("/login/poll", async (ctx) => {
   }
 
   ctx.body = omit(loginInfo, ["client"]);
+});
+
+router.post("/formatTitle", async (ctx) => {
+  const data = ctx.request.body as {
+    template: string;
+    options?: any;
+  };
+  const template = (data.template || "") as string;
+
+  const title = formatTitle(data.options, template);
+  ctx.body = title;
+});
+
+router.post("/formatSeasonTitle", async (ctx) => {
+  const { template, mediaTitleTemplate } = ctx.request.body as {
+    template?: string;
+    mediaTitleTemplate?: string;
+  };
+  const options = {
+    title: "标题",
+    username: "主播名",
+    time: new Date().toISOString(),
+    roomId: 123456,
+    filename: "文件名",
+  };
+  ctx.body = formatSeasonTitle(
+    {
+      ...options,
+      mediaTitle: formatTitle(options, mediaTitleTemplate || options.title),
+    },
+    template,
+  );
+});
+
+router.post("/formatPartTitle", async (ctx) => {
+  const data = ctx.request.body as {
+    template: string;
+    options?: PartTitleFormatOptions;
+  };
+  const template = (data.template || "") as string;
+
+  const title = formatPartTitle(
+    data.options ?? {
+      title: "标题",
+      username: "主播名",
+      time: new Date().toISOString(),
+      roomId: 123456,
+      filename: "文件名",
+      index: 1,
+    },
+    template,
+  );
+  ctx.body = title;
+});
+
+router.post("/formatDesc", async (ctx) => {
+  const data = ctx.request.body as {
+    template: string;
+    options?: any;
+  };
+  const template = (data.template || "") as string;
+
+  const desc = formatDesc(
+    data.options ?? {
+      title: "标题",
+      username: "主播名",
+      time: new Date().toISOString(),
+      roomId: 123456,
+      filename: "文件名",
+    },
+    template,
+  );
+  ctx.body = desc;
+});
+
+// 搜索联合投稿UP主
+router.get("/searchStaff", async (ctx) => {
+  const { kw, uid } = ctx.request.query as unknown as { kw: string; uid: string };
+  const data = await biliApi.searchStaffUser(Number(uid), kw);
+  ctx.body = data;
+});
+
+// 获取联合投稿剩余次数
+router.get("/staffRemaining", async (ctx) => {
+  const { uid } = ctx.request.query as unknown as { uid: string };
+  const data = await biliApi.getStaffRemaining(Number(uid));
+  ctx.body = data;
 });
 
 export default router;

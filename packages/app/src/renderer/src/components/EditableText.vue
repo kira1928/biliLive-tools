@@ -4,8 +4,10 @@
     v-model="modelValue"
     v-on-click-outside="enterOut"
     class="input"
+    :class="{ disabled: props.disabled }"
     :placeholder="props.placeholder"
     @focus="enterIn"
+    :disabled="props.disabled"
   />
 </template>
 
@@ -14,6 +16,7 @@ import { vOnClickOutside } from "@vueuse/components";
 
 interface Props {
   placeholder?: string;
+  disabled?: boolean;
   validate?: (value: string) => boolean;
   update?: (value: string) => string;
 }
@@ -25,12 +28,9 @@ const props = withDefaults(defineProps<Props>(), {
   validate: () => true,
 });
 
-const input = ref<HTMLInputElement | null>(null);
-
 const tempText = ref("");
 
 const enterIn = () => {
-  console.log("enterIn");
   tempText.value = modelValue.value;
 };
 const enterOut = () => {
@@ -51,11 +51,9 @@ const enterOut = () => {
   box-sizing: border-box;
   padding: 0;
   font-size: 15px;
-  caret-color: #18a058;
+  caret-color: var(--color-primary);
   background: none;
-  @media screen and (prefers-color-scheme: dark) {
-    color: rgba(255, 255, 255, 0.82);
-  }
+  color: var(--text-primary);
 }
 .input:focus {
   outline: none;

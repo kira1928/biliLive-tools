@@ -1,3 +1,77 @@
+# 1.18.0
+
+- 新增cookie模式支持
+
+# 1.17.0
+
+- 修复某些情况下`waitTime`不会被遵守的bug
+- 修复`multiThreadCheck`并发次数无法热加载的bug
+- 增加时间线的相关事件处理
+
+# 1.16.2
+
+- mesio二进制依赖升级到 0.4.1
+- 单个录制中首个视频初始文件名时间与弹幕对齐
+
+# 1.16.1
+
+- 弹幕统计重构 [#415](https://github.com/renmu123/biliLive-tools/pull/415)
+- 修复某些情况下不会自动检查的bug
+
+# 1.16.0
+
+- 优化重复文件的生成逻辑，避免覆盖
+- 优化某些情况下获取不到标题时使用第一个标题参数
+
+# 1.15.0
+
+- 分区参数支持
+
+# 1.14.0
+
+- 不同平台支持单独的检查参数 [#392](https://github.com/renmu123/biliLive-tools/pull/392)
+
+# 1.13.0
+
+- 录播姬引擎增加额外的超时判断
+- `startRecord` 增加参数 `ignoreDataLimit`，默认为true
+
+# 1.12.0
+
+- 禁止标题关键词支持正则 [#307](https://github.com/renmu123/biliLive-tools/pull/307)
+
+# 1.11.1
+
+- 修复某些情况下弹幕文件命名错误的情况
+
+# 1.11.0
+
+- 录播姬引擎支持切割
+- 录播姬引擎不再默认显示日志文件
+- mesio 支持 0.3.5 版本的智能停止
+
+# 1.10.0
+
+- 重构：录制器相关的参数修改为 `Downloader`
+- 修复：录播姬引擎分段时间不支持浮点数
+- segment 参数如果以"B","KB","MB","GB"结尾，会使用文件大小分段
+
+# 1.9.0
+
+- `recordHandle` 新增参数 `recorderType`
+- mesio 引擎默认禁用任何代理
+- 优化弹幕内存占用
+- 录制：优化ffmpeg默认参数，fmp4使用m4s后缀 [#224](https://github.com/renmu123/biliLive-tools/pull/224)
+- savePathRule 参数支持 `startTime` `recordStartTime` `liveStartTime` 参数
+
+# 1.8.0
+
+- 标题黑名单增加额外状态
+- 新增`debugLevel`参数，支持`none`、`basic`、`verbose`
+- 增加`maxThreadCount`参数任务并发数
+- 增加`waitTime`支持任务结束后的等待时间
+- 录播姬引擎支持
+
 # 1.7.0
 
 - 修复 mesio 某些情况下录制结束重命名错误的bug

@@ -1,7 +1,7 @@
 import { join, parse } from "node:path";
 import fs from "fs-extra";
 import readline from "node:readline";
-import { isNumber } from "lodash-es";
+import { isNumber, cloneDeep } from "lodash-es";
 
 import {
   pathExists,
@@ -12,78 +12,289 @@ import {
   getUnusedFileName,
 } from "../utils/index.js";
 import log from "../utils/log.js";
-import { appConfig } from "../config.js";
 import { DanmakuFactory } from "../danmu/danmakuFactory.js";
 import { generateDanmakuImage } from "../danmu/hotProgress.js";
 import { DanmuTask, taskQueue } from "./task.js";
-import { convertImage2Video, readVideoMeta } from "./video.js";
-import { container } from "../index.js";
+import { convertImage2Video, readVideoMeta, getBinPath, parseMeta } from "./video.js";
 import { parseXmlFile } from "../danmu/index.js";
 import { XMLBuilder } from "fast-xml-parser";
 
-import type {
-  DanmuConfig,
-  DanmaOptions,
-  HotProgressOptions,
-  GlobalConfig,
-} from "@biliLive-tools/types";
+import type { DanmuConfig, DanmaOptions, HotProgressOptions } from "@biliLive-tools/types";
 type WithRequired<T, K extends keyof T> = T & { [P in K]-?: T[P] };
+type XmlDanmuItemType = "danmu" | "sc" | "guard" | "gift";
+type XmlItem = Record<string, any>;
+type XmlFilterFunction = (type: XmlDanmuItemType, danmu: XmlItem, logger: typeof log) => boolean;
+type XmlTransformFunction = (type: XmlDanmuItemType, danmu: XmlItem, logger: typeof log) => unknown;
 
-const getDanmuFactoryPath = () => {
-  const config = appConfig.getAll();
-  let danmuFactoryPath = config.danmuFactoryPath;
-  if (!config.customExecPath) {
-    const globalConfig = container.resolve<GlobalConfig>("globalConfig");
-    danmuFactoryPath = globalConfig.defaultDanmakuFactoryPath;
+interface XmlEventItem {
+  sourceType: XmlDanmuItemType;
+  item: XmlItem;
+}
+
+interface ProcessedXmlBuckets {
+  danmu: CommonItem[];
+  sc: CommonItem[];
+  guard: CommonItem[];
+  gift: CommonItem[];
+}
+
+const createEmptyXmlBuckets = (): ProcessedXmlBuckets => ({
+  danmu: [],
+  sc: [],
+  guard: [],
+  gift: [],
+});
+
+const isXmlDanmuItemType = (value: unknown): value is XmlDanmuItemType => {
+  return ["danmu", "sc", "guard", "gift"].includes(String(value));
+};
+
+const isValidXmlItemForType = (type: XmlDanmuItemType, item: XmlItem) => {
+  if (type === "danmu") {
+    return typeof item["@_p"] === "string" && item["@_p"].length > 0;
   }
 
-  return danmuFactoryPath;
+  return (
+    (typeof item["@_ts"] === "string" && item["@_ts"].length > 0) ||
+    typeof item["@_ts"] === "number"
+  );
+};
+
+const logInvalidTransformedItem = (
+  reason: string,
+  sourceType: XmlDanmuItemType,
+  item: unknown,
+  targetType?: unknown,
+) => {
+  log.error("filterFunction transform item dropped", {
+    reason,
+    sourceType,
+    targetType,
+    item,
+  });
+};
+
+const createFilterFunction = (filterFunction: string): XmlFilterFunction | undefined => {
+  if (!filterFunction.includes("filter")) {
+    return;
+  }
+
+  return new Function(
+    "type",
+    "danmu",
+    "logger",
+    `
+    ${filterFunction}
+    return filter(type, danmu, logger);`,
+  ) as XmlFilterFunction;
+};
+
+const createTransformFunction = (filterFunction: string): XmlTransformFunction | undefined => {
+  if (!filterFunction.includes("transform")) {
+    return;
+  }
+
+  return new Function(
+    "type",
+    "danmu",
+    "logger",
+    `
+    ${filterFunction}
+    return transform(type, danmu, logger);`,
+  ) as XmlTransformFunction;
+};
+
+const transformXmlItem = (
+  sourceType: XmlDanmuItemType,
+  item: XmlItem,
+  transformFunc: XmlTransformFunction,
+) => {
+  const transformed = transformFunc(sourceType, item, log);
+
+  if (transformed == null || transformed === false) {
+    return null;
+  }
+
+  const candidate = transformed === true || transformed === undefined ? item : transformed;
+  if (typeof candidate !== "object" || candidate === null || Array.isArray(candidate)) {
+    logInvalidTransformedItem("transform must return an object", sourceType, candidate);
+    return null;
+  }
+
+  const nextType = "type" in candidate ? candidate.type : sourceType;
+  if (!isXmlDanmuItemType(nextType)) {
+    logInvalidTransformedItem("unsupported target type", sourceType, candidate, nextType);
+    return null;
+  }
+
+  const normalizedItem: XmlItem = { ...(candidate as XmlItem) };
+  delete normalizedItem.type;
+
+  if (!isValidXmlItemForType(nextType, normalizedItem)) {
+    logInvalidTransformedItem(
+      "missing required fields for target type",
+      sourceType,
+      candidate,
+      nextType,
+    );
+    return null;
+  }
+
+  return {
+    type: nextType,
+    item: normalizedItem,
+  };
+};
+
+export const processXmlItems = (events: XmlEventItem[], filterFunction: string) => {
+  const buckets = createEmptyXmlBuckets();
+  const filterFunc = createFilterFunction(filterFunction);
+  const transformFunc = createTransformFunction(filterFunction);
+
+  for (const event of events) {
+    if (filterFunc && !filterFunc(event.sourceType, event.item, log)) {
+      continue;
+    }
+
+    if (!transformFunc) {
+      buckets[event.sourceType].push(event.item as CommonItem);
+      continue;
+    }
+
+    const transformedItem = transformXmlItem(event.sourceType, event.item, transformFunc);
+    if (!transformedItem) {
+      continue;
+    }
+
+    buckets[transformedItem.type].push(transformedItem.item as CommonItem);
+  }
+
+  return buckets;
+};
+
+const createXmlEvents = (items: XmlItem[], sourceType: XmlDanmuItemType): XmlEventItem[] => {
+  const result: XmlEventItem[] = [];
+
+  for (const item of items) {
+    result.push({
+      sourceType,
+      item,
+    });
+  }
+
+  return result;
+};
+
+const parseXmlMetadata = async (
+  jObj: XmlItem,
+  files: { videoFilePath?: string; danmaFilePath: string },
+) => {
+  const parsedMeta = await parseMeta(files);
+  return {
+    user_name: parsedMeta.username,
+    room_id: parsedMeta.roomId,
+    room_title: parsedMeta.title,
+    video_start_time: parsedMeta.startTimestamp === null ? null : parsedMeta.startTimestamp * 1000,
+    platform: parsedMeta.platform,
+    BililiveRecorderVersion:
+      jObj.i?.BililiveRecorder?.["@_version"] ??
+      jObj.i?.BililiveRecorder?.version ??
+      jObj.i?.BililiveRecorderVersion ??
+      jObj.i?.metadata?.BililiveRecorderVersion,
+  };
 };
 
 /**
- * 不要调用，调用convertXml2Ass
+ * 生成经过自定义处理后的xml文件
+ * @param input
+ * @param output
+ * @param options
+ * @returns
+ */
+const genProcessedXml = async (input: string, output: string, filterFunction: string) => {
+  const { jObj, danmuku, sc, guard, gift } = await parseXmlFile(input, true);
+  const metadata = await parseXmlMetadata(jObj, { danmaFilePath: input });
+  const events = [
+    ...createXmlEvents(danmuku, "danmu"),
+    ...createXmlEvents(sc, "sc"),
+    ...createXmlEvents(guard, "guard"),
+    ...createXmlEvents(gift, "gift"),
+  ];
+  const processedBuckets = processXmlItems(events, filterFunction);
+  const xmlData = generateMergedXmlContent(
+    processedBuckets.danmu as unknown as DanmuItem[],
+    processedBuckets.gift,
+    processedBuckets.sc,
+    processedBuckets.guard,
+    metadata,
+  );
+  await fs.writeFile(output, xmlData);
+  return output;
+};
+
+/**
+ * 自定义函数函数
+ */
+const customChangeFunc = (input: string, opts: DanmuConfig) => {
+  const customFunc = new Function(
+    "file",
+    "opts",
+    "logger",
+    `
+    ${opts.filterFunction}
+    return custom(file, opts, logger);`,
+  );
+
+  return customFunc(input, opts, log);
+};
+
+/**
+ * 不要直接调用，调用convertXml2Ass
  */
 const addConvertDanmu2AssTask = async (
   originInput: string,
   output: string,
   danmuOptions: DanmuConfig,
-  options: Pick<DanmaOptions, "copyInput" | "removeOrigin"> = {},
+  options: Pick<DanmaOptions, "removeOrigin"> = {},
 ) => {
-  if (await pathExists(output)) {
-    log.info("danmufactory", {
-      status: "success",
-      text: "文件已存在，删除",
-      input: originInput,
-      output: output,
-    });
-    await fs.unlink(output);
-  }
-  const DANMUKUFACTORY_PATH = getDanmuFactoryPath();
-  const danmu = new DanmakuFactory(DANMUKUFACTORY_PATH);
-  let tempInput: string | undefined;
+  const { danmuFactoryPath } = getBinPath();
+  const danmu = new DanmakuFactory(danmuFactoryPath);
   const tempDir = getTempPath();
-  if (options.copyInput) {
-    tempInput = join(tempDir, `${uuid()}.xml`);
-    await fs.copyFile(originInput, tempInput);
+
+  let opts = cloneDeep(danmuOptions);
+  if (opts.filterFunction && (opts.filterFunction ?? "").includes("custom")) {
+    opts = await customChangeFunc(originInput, opts);
   }
 
-  if (danmuOptions.blacklist) {
+  let filteredOutput: string | undefined;
+  const hasFilterFunction =
+    Boolean((opts.filterFunction ?? "").trim()) && (opts.filterFunction ?? "").includes("filter");
+  const hasTransformFunction =
+    Boolean((opts.filterFunction ?? "").trim()) &&
+    (opts.filterFunction ?? "").includes("transform");
+  if (hasTransformFunction || hasFilterFunction) {
+    // 如果存在自定义数据处理函数，则需要把处理后的xml保存到临时文件夹中
+    filteredOutput = join(tempDir, `${uuid()}.xml`);
+    await genProcessedXml(originInput, filteredOutput, opts.filterFunction);
+  }
+
+  if (opts.blacklist) {
     const fileTxtPath = join(tempDir, `${uuid()}.txt`);
-    const fileTxtContent = danmuOptions.blacklist
+    const fileTxtContent = opts.blacklist
       .split(",")
       .filter((value) => value)
       .join("\n");
     await fs.writeFile(fileTxtPath, fileTxtContent);
-    danmuOptions.blacklist = fileTxtPath;
+    opts.blacklist = fileTxtPath;
   }
 
-  const input = tempInput || originInput;
+  const input = filteredOutput || originInput;
   const task = new DanmuTask(
     danmu,
     {
       input: input,
       output,
-      options: danmuOptions,
+      options: opts,
       name: `弹幕转换任务: ${parse(originInput).name}`,
     },
     {
@@ -92,11 +303,12 @@ const addConvertDanmu2AssTask = async (
           await trashItem(originInput);
         }
 
-        if (tempInput && (await pathExists(tempInput))) {
-          await fs.unlink(tempInput);
+        if (opts.blacklist) {
+          fs.unlink(opts.blacklist);
         }
-        if (danmuOptions.blacklist && (await pathExists(danmuOptions.blacklist))) {
-          await fs.unlink(danmuOptions.blacklist);
+
+        if (filteredOutput) {
+          fs.unlink(filteredOutput);
         }
       },
       onError: async (error) => {
@@ -106,11 +318,11 @@ const addConvertDanmu2AssTask = async (
           input: originInput,
           output: output,
         });
-        if (tempInput && (await pathExists(tempInput))) {
-          await fs.unlink(tempInput);
+        if (opts.blacklist) {
+          fs.unlink(opts.blacklist);
         }
-        if (danmuOptions.blacklist && (await pathExists(danmuOptions.blacklist))) {
-          await fs.unlink(danmuOptions.blacklist);
+        if (filteredOutput) {
+          fs.unlink(filteredOutput);
         }
       },
     },
@@ -147,7 +359,7 @@ export const convertXml2Ass = async (
   }
 
   if (!options.override && (await pathExists(output))) {
-    throw new Error(`${output}文件已存在`);
+    throw new Error(`${output} 文件已存在`);
   }
 
   const task = await addConvertDanmu2AssTask(file.input, output, danmuOptions, options);
@@ -289,6 +501,9 @@ export function processDanmuOffset<T extends DanmuItem | CommonItem>(
     });
 }
 
+// 与录制文件一致的内嵌 XSL 样式，按原始 XML 写入，避免被转义。
+const RECORDER_XML_STYLE = `<z:stylesheet version="1.0" id="s" xml:id="s" xmlns:z="http://www.w3.org/1999/XSL/Transform"><z:output method="html"/><z:template match="/"><html><meta name="viewport" content="width=device-width"/><title>弹幕文件 <z:value-of select="/i/metadata/user_name/text()"/></title><style>body{margin:0}h1,h2,p,table{margin-left:5px}table{border-spacing:0}td,th{border:1px solid grey;padding:1px 5px}th{position:sticky;top:0;background:#4098de}tr:hover{background:#d9f4ff}div{overflow:auto;max-height:80vh;max-width:100vw;width:fit-content}</style><h1>弹幕XML文件</h1><p>本文件不支持在 IE 浏览器里预览，请使用 Chrome Firefox Edge 等浏览器。</p><p>文件用法参考文档 <a href="https://rec.danmuji.org/user/danmaku/">https://rec.danmuji.org/user/danmaku/</a></p><table><tr><td>房间号</td><td><z:value-of select="/i/metadata/room_id/text()"/></td></tr><tr><td>主播名</td><td><z:value-of select="/i/metadata/user_name/text()"/></td></tr><tr><td><a href="#d">弹幕</a></td><td>共<z:value-of select="count(/i/d)"/>条记录</td></tr><tr><td><a href="#guard">上船</a></td><td>共<z:value-of select="count(/i/guard)"/>条记录</td></tr><tr><td><a href="#sc">SC</a></td><td>共<z:value-of select="count(/i/sc)"/>条记录</td></tr><tr><td><a href="#gift">礼物</a></td><td>共<z:value-of select="count(/i/gift)"/>条记录</td></tr></table><h2 id="d">弹幕</h2><div id="dm"><table><tr><th>用户名</th><th>出现时间</th><th>用户ID</th><th>弹幕</th><th>参数</th></tr><z:for-each select="/i/d"><tr><td><z:value-of select="@user"/></td><td></td><td></td><td><z:value-of select="."/></td><td><z:value-of select="@p"/></td></tr></z:for-each></table></div><script>Array.from(document.querySelectorAll('#dm tr')).slice(1).map(t=>t.querySelectorAll('td')).forEach(t=>{let p=t[4].textContent.split(','),a=p[0];t[1].textContent=\`\u0024{(Math.floor(a/60/60)+'').padStart(2,0)}:\u0024{(Math.floor(a/60%60)+'').padStart(2,0)}:\u0024{(a%60).toFixed(3).padStart(6,0)}\`;t[2].innerHTML=\`&lt;a target=_blank rel="nofollow noreferrer" "&gt;\u0024{p[6]}&lt;/a&gt;\`})</script><h2 id="guard">舰长购买</h2><div><table><tr><th>用户名</th><th>用户ID</th><th>舰长等级</th><th>购买数量</th><th>出现时间</th></tr><z:for-each select="/i/guard"><tr><td><z:value-of select="@user"/></td><td><a rel="nofollow noreferrer"><z:attribute name="href"><z:text></z:text><z:value-of select="@uid" /></z:attribute><z:value-of select="@uid"/></a></td><td><z:value-of select="@level"/></td><td><z:value-of select="@count"/></td><td><z:value-of select="@ts"/></td></tr></z:for-each></table></div><h2 id="sc">SuperChat 醒目留言</h2><div><table><tr><th>用户名</th><th>用户ID</th><th>内容</th><th>显示时长</th><th>价格</th><th>出现时间</th></tr><z:for-each select="/i/sc"><tr><td><z:value-of select="@user"/></td><td><a rel="nofollow noreferrer"><z:attribute name="href"><z:text></z:text><z:value-of select="@uid" /></z:attribute><z:value-of select="@uid"/></a></td><td><z:value-of select="."/></td><td><z:value-of select="@time"/></td><td><z:value-of select="@price"/></td><td><z:value-of select="@ts"/></td></tr></z:for-each></table></div><h2 id="gift">礼物</h2><div><table><tr><th>用户名</th><th>用户ID</th><th>礼物名</th><th>礼物数量</th><th>出现时间</th></tr><z:for-each select="/i/gift"><tr><td><z:value-of select="@user"/></td><td><span rel="nofollow noreferrer"><z:attribute name="href"></z:attribute><z:value-of select="@uid"/></span></td><td><z:value-of select="@giftname"/></td><td><z:value-of select="@giftcount"/></td><td><z:value-of select="@ts"/></td></tr></z:for-each></table></div></html></z:template></z:stylesheet>`;
+
 /**
  * 生成合并后的XML内容（纯函数）
  */
@@ -299,15 +514,23 @@ export function generateMergedXmlContent(
   mergedGuard: CommonItem[],
   metadata: Record<string, any> | null = null,
 ): string {
+  const styleTag = metadata?.BililiveRecorderVersion
+    ? "BililiveRecorderXmlStyle"
+    : "RecorderXmlStyle";
   const builder = new XMLBuilder({
     ignoreAttributes: false,
     attributeNamePrefix: "@_",
     format: true,
+    stopNodes: [`i.${styleTag}`],
   });
+  const BililiveRecorderVersion = metadata?.BililiveRecorderVersion || undefined;
+  delete metadata?.BililiveRecorderVersion;
 
   const xmlContent = builder.build({
     i: {
       metadata,
+      BililiveRecorderVersion: BililiveRecorderVersion,
+      [styleTag]: RECORDER_XML_STYLE,
       d: mergedDanmuku,
       gift: mergedGift,
       sc: mergedSc,
@@ -315,7 +538,7 @@ export function generateMergedXmlContent(
     },
   });
 
-  return `<?xml version="1.0" encoding="utf-8"?>\n${xmlContent}`;
+  return `<?xml version="1.0" encoding="utf-8"?>\n<?xml-stylesheet type="text/xsl" href="#s"?>\n${xmlContent}`;
 }
 
 /**
@@ -354,16 +577,24 @@ export const mergeXml = async (
   for (const file of inputFiles) {
     // 读取视频元数据获取时长
     const meta = await readVideoMeta(file.videoPath);
-    const duration = meta.format.duration || 0;
+    const duration = Number(meta.format.duration || 0);
+    if (duration === 0 || isNaN(duration)) {
+      throw new Error("视频无法读取到时间，无法进行处理");
+    }
 
     // 解析XML文件
-    const { jObj, danmuku, sc, guard, gift } = await parseXmlFile(file.danmakuPath);
+    const { jObj, danmuku, sc, guard, gift } = await parseXmlFile(file.danmakuPath, true);
+
+    const metadata = await parseXmlMetadata(jObj, {
+      videoFilePath: file.videoPath,
+      danmaFilePath: file.danmakuPath,
+    });
 
     videoData.push({
       path: file.danmakuPath,
       videoDuration: duration,
       startOffset: cumulativeDuration,
-      meta: jObj.i?.metadata || {},
+      meta: metadata,
       danmuku: danmuku || [],
       sc: sc || [],
       guard: guard || [],

@@ -1,7 +1,7 @@
 import ws from "ws";
 import events from "events";
 import to_arraybuffer from "to-arraybuffer";
-import socks_agent from "socks-proxy-agent";
+import { SocksProxyAgent } from "socks-proxy-agent";
 
 import { Taf, TafMx, HUYA, List } from "./lib.js";
 import { md5, intToHexColor } from "./utils.js";
@@ -16,20 +16,37 @@ class huya_danmu extends events {
     if (typeof opt === "string") {
       this._roomid = opt;
       this._max_retries = 10;
+      this.opt = {};
     } else if (typeof opt === "object") {
       this._roomid = opt.roomid;
+      this.opt = opt;
       this._max_retries = opt.maxRetries || 10;
-      this.set_proxy(opt.proxy);
+      if (opt.proxy) {
+        this.set_proxy(opt.proxy);
+      }
     }
     this._gift_info = {};
     this._chat_list = new List();
     this._emitter = new events.EventEmitter();
     this._retry_count = 0;
     this._is_manual_stop = false;
+    this._last_retry_time = 0;
   }
 
   set_proxy(proxy) {
-    this._agent = new socks_agent(proxy);
+    this._agent = new SocksProxyAgent(proxy);
+  }
+
+  // 节流重试函数,确保一秒内只能触发一次
+  _throttled_retry() {
+    const now = Date.now();
+    if (now - this._last_retry_time < 1000) {
+      return;
+    }
+    this._last_retry_time = now;
+    this._retry_count++;
+    this.emit("retry", { count: this._retry_count, max: this._max_retries });
+    setTimeout(() => this._try_connect(), retry_interval);
   }
 
   // 重试辅助函数
@@ -95,13 +112,21 @@ class huya_danmu extends events {
   }
 
   async _try_connect() {
-    try {
-      this._info = await this._retry_async(() => this._get_chat_info(), 10, 3000);
-      if (!this._info) return this.emit("error", new Error("Fail to parse info"));
-    } catch (error) {
-      this.emit("error", error);
-      this._starting = false;
-      return;
+    if (this.opt?.uid && this.opt?.channelId && this.opt?.subChannelId) {
+      this._info = {
+        yyuid: this.opt.uid,
+        topsid: this.opt.channelId,
+        subsid: this.opt.subChannelId,
+      };
+    } else {
+      try {
+        this._info = await this._retry_async(() => this._get_chat_info(), 10, 3000);
+        if (!this._info) return this.emit("error", new Error("Fail to parse info"));
+      } catch (error) {
+        this.emit("error", error);
+        this._starting = false;
+        return;
+      }
     }
 
     this._main_user_id = new HUYA.UserId();
@@ -129,17 +154,13 @@ class huya_danmu extends events {
     this._client.on("error", (err) => {
       this.emit("error", err);
       if (!this._is_manual_stop && this._retry_count < this._max_retries) {
-        this._retry_count++;
-        this.emit("retry", { count: this._retry_count, max: this._max_retries });
-        setTimeout(() => this._try_connect(), retry_interval);
+        this._throttled_retry();
       }
     });
     this._client.on("close", async () => {
       this._stop();
       if (!this._is_manual_stop && this._retry_count < this._max_retries) {
-        this._retry_count++;
-        this.emit("retry", { count: this._retry_count, max: this._max_retries });
-        setTimeout(() => this._try_connect(), retry_interval);
+        this._throttled_retry();
       } else {
         this.emit("close");
       }
@@ -227,6 +248,8 @@ class huya_danmu extends events {
     ws_command.vData = jce_stream.getBinBuffer();
     jce_stream = new Taf.JceOutputStream();
     ws_command.writeTo(jce_stream);
+
+    if (this._client.readyState !== ws.OPEN) return;
     this._client.send(jce_stream.getBuffer());
   }
 
@@ -282,8 +305,6 @@ class huya_danmu extends events {
 
   _send_wup(action, callback, req) {
     try {
-      if (this._client.readyState !== ws.OPEN) return;
-
       const wup = new Taf.Wup();
       wup.setServant(action);
       wup.setFunc(callback);
@@ -293,6 +314,8 @@ class huya_danmu extends events {
       command.vData = wup.encode();
       const stream = new Taf.JceOutputStream();
       command.writeTo(stream);
+
+      if (this._client.readyState !== ws.OPEN) return;
       this._client.send(stream.getBuffer());
     } catch (err) {
       this.emit("error", err);
@@ -304,7 +327,9 @@ class huya_danmu extends events {
     this._emitter.removeAllListeners();
     clearInterval(this._heartbeat_timer);
     clearInterval(this._fresh_gift_list_timer);
-    this._client && this._client.terminate();
+
+    if (this._client.readyState !== ws.OPEN) return;
+    this._client && this._client.close();
   }
 
   stop() {

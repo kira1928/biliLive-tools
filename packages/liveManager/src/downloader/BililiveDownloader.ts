@@ -1,0 +1,288 @@
+import EventEmitter from "node:events";
+import { spawn, ChildProcess } from "node:child_process";
+
+import { DEFAULT_USER_AGENT } from "./index.js";
+import { StreamManager, getBililivePath, utils } from "../index.js";
+import { byte2MB } from "../utils.js";
+import { IDownloader, BililiveRecorderOptions, Segment } from "./IDownloader.js";
+
+// Bililive command builder class similar to ffmpeg
+class BililiveRecorderCommand extends EventEmitter {
+  private _input: string = "";
+  private _output: string = "";
+  private _inputOptions: string[] = [];
+  private process: ChildProcess | null = null;
+
+  constructor() {
+    super();
+  }
+
+  input(source: string): BililiveRecorderCommand {
+    this._input = source;
+    return this;
+  }
+
+  output(target: string): BililiveRecorderCommand {
+    this._output = target;
+    return this;
+  }
+
+  inputOptions(options: string[]): BililiveRecorderCommand;
+  inputOptions(...options: string[]): BililiveRecorderCommand;
+  inputOptions(...options: any[]): BililiveRecorderCommand {
+    const opts = Array.isArray(options[0]) ? options[0] : options;
+    this._inputOptions.push(...opts);
+    return this;
+  }
+
+  _getArguments(): string[] {
+    const args: string[] = ["downloader", "-p"];
+
+    // Add input source
+    if (this._input) {
+      args.push(this._input);
+    }
+
+    // Add input options first
+    args.push(...this._inputOptions);
+
+    // Add output target
+    if (this._output) {
+      // const { dir, name } = path.parse(this._output);
+      // args.push("-o", dir);
+      args.push(this._output);
+    }
+    // args.push("-v");
+
+    return args;
+  }
+
+  run(): void {
+    const args = this._getArguments();
+    const bililiveExecutable = getBililivePath();
+
+    this.process = spawn(bililiveExecutable, args, {
+      stdio: ["pipe", "pipe", "pipe"],
+      windowsHide: true,
+    });
+
+    if (this.process.stdout) {
+      this.process.stdout.on("data", (data) => {
+        const output = data.toString();
+        // console.log(output);
+        this.emit("stderr", output);
+      });
+    }
+
+    if (this.process.stderr) {
+      this.process.stderr.on("data", (data) => {
+        const output = data.toString();
+        // console.error(output);
+        this.emit("stderr", output);
+      });
+    }
+
+    this.process.on("error", (error) => {
+      this.emit("error", error);
+    });
+    this.process.on("close", (code) => {
+      if (code === 0) {
+        this.emit("end");
+      } else {
+        this.emit("error", new Error(`bililive process exited with code ${code}`));
+      }
+    });
+  }
+
+  stop(): void {
+    if (this.process) {
+      this.process.stdin?.write("q\n");
+    }
+  }
+  kill(): void {
+    if (this.process) {
+      this.process.kill("SIGINT");
+    }
+  }
+  cut(): void {
+    if (this.process) {
+      this.process.stdin?.write("s\n");
+    }
+  }
+}
+
+// Factory function similar to createFFMPEGBuilder
+export const createBililiveBuilder = (): BililiveRecorderCommand => {
+  return new BililiveRecorderCommand();
+};
+
+export class BililiveDownloader extends EventEmitter implements IDownloader {
+  public type = "bililive" as const;
+  private command: BililiveRecorderCommand;
+  private streamManager: StreamManager;
+  private timeoutChecker: ReturnType<typeof utils.createTimeoutChecker>;
+  readonly hasSegment: boolean;
+  readonly getSavePath: (data: { startTime: number; title?: string }) => string;
+  readonly segment: Segment;
+  readonly inputOptions: string[] = [];
+  readonly disableDanma: boolean = false;
+  readonly url: string;
+  readonly debugLevel: "none" | "basic" | "verbose" = "none";
+  readonly proxy?: string;
+  readonly headers:
+    | {
+        [key: string]: string | undefined;
+      }
+    | undefined;
+
+  constructor(
+    opts: BililiveRecorderOptions,
+    private onEnd: (...args: unknown[]) => void,
+    private onUpdateLiveInfo: () => Promise<{ title?: string; cover?: string }>,
+  ) {
+    super();
+    // 存在自动分段，永远为true
+    const hasSegment = true;
+    this.hasSegment = hasSegment;
+    this.disableDanma = opts.disableDanma ?? false;
+    this.debugLevel = opts.debugLevel ?? "none";
+    this.proxy = opts.proxy;
+    let videoFormat: "flv" = "flv";
+
+    this.streamManager = new StreamManager(
+      opts.getSavePath,
+      hasSegment,
+      this.disableDanma,
+      "bililive",
+      videoFormat,
+      {
+        onUpdateLiveInfo: this.onUpdateLiveInfo,
+      },
+    );
+    this.timeoutChecker = utils.createTimeoutChecker(
+      () => {
+        this.emit("DebugLog", { type: "error", text: "bililive timeout, killing process" });
+        this.command?.kill();
+        this.onEnd("bililive timeout");
+      },
+      20 * 1000,
+      false,
+    );
+    this.getSavePath = opts.getSavePath;
+    this.inputOptions = [];
+    this.url = opts.url;
+    this.segment = opts.segment;
+    this.headers = {
+      "User-Agent": DEFAULT_USER_AGENT,
+      ...(opts.headers || {}),
+    };
+
+    this.command = this.createCommand();
+
+    this.streamManager.on("videoFileCreated", ({ filename, cover, rawFilename, title }) => {
+      this.emit("videoFileCreated", { filename, cover, rawFilename, title });
+    });
+    this.streamManager.on("videoFileCompleted", (data) => {
+      this.emit("videoFileCompleted", data);
+    });
+    this.streamManager.on("DebugLog", (data) => {
+      this.emit("DebugLog", data);
+    });
+  }
+
+  createCommand() {
+    this.timeoutChecker?.start();
+    const inputOptions = [...this.inputOptions, "--disable-log-file", "true"];
+    if (this.debugLevel === "verbose") {
+      inputOptions.push("-l", "Debug");
+    }
+    if (this.proxy) {
+      inputOptions.push(...["--proxy", this.proxy]);
+    }
+
+    if (this.headers) {
+      Object.entries(this.headers).forEach(([key, value]) => {
+        if (!value) return;
+        inputOptions.push("-h", `${key}: ${value}`);
+      });
+    }
+    if (this.segment) {
+      if (typeof this.segment === "number") {
+        inputOptions.push("-d", `${this.segment}`);
+      } else if (typeof this.segment === "string") {
+        inputOptions.push("-m", byte2MB(Number(this.segment)).toFixed(2));
+      }
+    }
+
+    const command = createBililiveBuilder()
+      .input(this.url)
+      .inputOptions(inputOptions)
+      .output(this.streamManager.videoFilePath)
+      .on("error", this.onEnd)
+      .on("end", () => this.onEnd("finished"))
+      .on("stderr", async (stderrLine) => {
+        this.timeoutChecker?.update();
+        this.emit("DebugLog", { type: "ffmpeg", text: stderrLine });
+        await this.streamManager.handleVideoStarted(stderrLine);
+        const info = this.formatLine(stderrLine);
+        if (info) {
+          this.emit("progress", info);
+        }
+      });
+
+    return command;
+  }
+
+  formatLine(line: string) {
+    if (!line.includes("下载进度:")) {
+      return null;
+    }
+    let time: string | null = null;
+
+    const timeMatch = line.match(/录制时长:\s*([0-9:]+)\s/);
+    if (timeMatch) {
+      time = timeMatch[1];
+    }
+
+    const spaceMath = line.match(/下载进度:\s*([\d.]+\s*MB)\s*/);
+    if (spaceMath) {
+      const space = spaceMath[1];
+      time = time ? `${time} ${space}` : space;
+    }
+
+    return {
+      time,
+    };
+  }
+
+  public run() {
+    this.command.run();
+  }
+
+  public getArguments() {
+    return this.command._getArguments();
+  }
+
+  public async stop() {
+    this.timeoutChecker?.stop();
+    try {
+      this.command.stop();
+
+      await this.streamManager.handleVideoCompleted();
+    } catch (err) {
+      this.emit("DebugLog", { type: "error", text: String(err) });
+    }
+  }
+
+  public getExtraDataController() {
+    return this.streamManager?.getExtraDataController();
+  }
+
+  public get videoFilePath() {
+    return this.streamManager.videoFilePath;
+  }
+
+  public cut() {
+    this.command.cut();
+  }
+}

@@ -5,7 +5,15 @@ import json from "@rollup/plugin-json";
 
 export default [
   {
-    external: ["ntsuspend", "@napi-rs/canvas", "font-ls", "better-sqlite3", "fsevents"],
+    external: [
+      "ntsuspend",
+      "@napi-rs/canvas",
+      "font-ls",
+      "better-sqlite3",
+      "shazamio-core",
+      "music-segment-detector",
+      "fsevents",
+    ],
     input: "src/index.ts",
     output: [
       {
@@ -13,13 +21,12 @@ export default [
         format: "cjs",
         entryFileNames: "[name].cjs",
         chunkFileNames: "[name]-[hash].cjs",
-        sourcemap: true,
       },
     ],
     // inlineDynamicImports: true,
     plugins: [
       typescript(),
-      nodeResolve({ browser: false, exportConditions: ["default"] }),
+      nodeResolve({ browser: false, exportConditions: ["node"] }),
       commonjs(),
       json(),
     ],

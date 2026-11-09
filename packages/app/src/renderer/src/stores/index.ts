@@ -1,14 +1,20 @@
-import { cloneDeep, isArray } from "lodash-es";
+import { cloneDeep } from "lodash-es";
+import { v4 as uuid } from "uuid";
 import { defineStore, storeToRefs } from "pinia";
 import { DanmuPreset, BiliupPreset, AppConfig } from "@biliLive-tools/types";
 import { getUserList } from "@renderer/apis/user";
 import {
+  biliApi,
   danmuPresetApi,
   ffmpegPresetApi,
   videoPresetApi,
   configApi,
   taskApi,
+  commonApi,
+  douyuApi,
 } from "@renderer/apis";
+import { deepRaw } from "@renderer/utils";
+import { useSubtitles } from "./subtitles";
 
 import type { Task } from "@renderer/types";
 
@@ -67,6 +73,15 @@ export const useUserInfoStore = defineStore("userInfo", () => {
   });
 
   return { userInfo, getUsers, userList, changeUser };
+});
+
+export const useDouyuUserStore = defineStore("douyuUser", () => {
+  const userList = ref<Awaited<ReturnType<typeof douyuApi.getUsers>>>([]);
+  async function getUsers() {
+    userList.value = await douyuApi.getUsers();
+  }
+  getUsers();
+  return { userList, getUsers };
 });
 
 export const useDanmuPreset = defineStore("danmuPreset", () => {
@@ -151,6 +166,7 @@ export const useFfmpegPreset = defineStore("ffmpegPreset", () => {
 export const useUploadPreset = defineStore("uploadPreset", () => {
   const upladPresetId = ref("default");
   const uploadPresets = ref<BiliupPreset[]>([]);
+  const uploadPresetVersion = ref(0);
   // @ts-ignore
   const uploadPreset: Ref<BiliupPreset> = ref({
     config: {},
@@ -160,11 +176,25 @@ export const useUploadPreset = defineStore("uploadPreset", () => {
     uploadPresets.value = await videoPresetApi.list();
   }
 
+  async function saveUploadPreset(data: BiliupPreset) {
+    await biliApi.validUploadParams(deepRaw(data.config));
+    await videoPresetApi.save(deepRaw(data));
+    await getUploadPresets();
+    uploadPresetVersion.value += 1;
+  }
+
+  async function removeUploadPreset(id: string) {
+    await videoPresetApi.remove(id);
+    await getUploadPresets();
+    uploadPresetVersion.value += 1;
+  }
+
   const uploaPresetsOptions = computed(() => {
     return uploadPresets.value.map((item) => {
       return {
         label: item.name,
         value: item.id,
+        options: item.config,
       };
     });
   });
@@ -173,7 +203,10 @@ export const useUploadPreset = defineStore("uploadPreset", () => {
 
   return {
     uploadPresets,
+    uploadPresetVersion,
     getUploadPresets,
+    saveUploadPreset,
+    removeUploadPreset,
     uploaPresetsOptions,
     upladPresetId,
     uploadPreset,
@@ -184,19 +217,42 @@ export const useQueueStore = defineStore("queue", () => {
   const runningTaskNum = ref(0);
   const queue = ref<Task[]>([]);
   const params = ref({ type: "" });
+  let eventSource: EventSource | null = null;
+  let checkTimer: number | null = null;
 
   const getQuenu = async () => {
     const res = await taskApi.list(params.value);
-    // 为了web的兼容性考虑
-    if (isArray(res)) {
-      queue.value = res.reverse();
-    } else {
-      queue.value = res.list.reverse();
-      // runningTaskNum.value = res.runningTaskNum;
-    }
+    queue.value = res.list.reverse();
   };
   const setRunningTaskNum = (num: number) => {
     runningTaskNum.value = num;
+  };
+
+  const init = async () => {
+    if (eventSource && eventSource.readyState !== 2) return;
+    eventSource = await commonApi.getRunningTaskNum();
+
+    eventSource.onmessage = function (event) {
+      const data = JSON.parse(event.data || "{}");
+      setRunningTaskNum(data.num);
+    };
+
+    // 清除之前的定时器
+    if (checkTimer) {
+      clearInterval(checkTimer);
+    }
+
+    // 每10分钟检查一次连接状态
+    checkTimer = window.setInterval(
+      () => {
+        if (eventSource && eventSource.readyState === 2) {
+          // 连接已关闭，重新初始化
+          eventSource = null;
+          init();
+        }
+      },
+      10 * 60 * 1000,
+    );
   };
 
   watch(
@@ -212,6 +268,7 @@ export const useQueueStore = defineStore("queue", () => {
     queue,
     params,
     setRunningTaskNum,
+    init,
   };
 });
 
@@ -239,6 +296,7 @@ export const useAppConfig = defineStore("appConfig", () => {
       fileSync: {
         removeOrigin: false,
         syncType: undefined,
+        aliyunpanDriveType: "backup",
         targetPath: "",
       },
       danmu: {
@@ -264,12 +322,18 @@ export const useAppConfig = defineStore("appConfig", () => {
         keepFirstVideoMeta: false,
         mergeXml: false,
       },
+      flvRepair: {
+        type: "bililive",
+        saveRadio: 1,
+        savePath: "",
+      },
       download: {
         savePath: "",
         danmu: "none",
         douyuResolution: "highest",
         override: false,
         onlyAudio: false,
+        onlyDanmu: false,
       },
       translate: {
         presetId: undefined,
@@ -286,6 +350,9 @@ export const useAppConfig = defineStore("appConfig", () => {
         title: "{{filename}}-{{label}}-{{num}}",
         danmuPresetId: "default",
         ignoreDanmu: false,
+        ignoreSubtitle: false,
+        exportSubtitle: true,
+        uploadPresetId: "",
       },
     },
   });
@@ -354,17 +421,27 @@ function useHistoryStore<T>({ limit }: { limit: number }) {
 
 export default useHistoryStore;
 
-interface Segment {
+export interface Segment {
+  id: string;
   start: number;
   end?: number;
   name: string;
   checked: boolean;
   tags?: any;
+  index: number;
+  loading?: boolean;
 }
 type SegmentWithRequiredEnd = Required<Pick<Segment, "end">> & Omit<Segment, "end">;
+type SegmentEventType = "add" | "remove" | "update" | "clear";
+type SegmentEventCallback = (data: {
+  type: SegmentEventType;
+  segment?: Segment;
+  id?: string;
+}) => void;
 
 export const useSegmentStore = defineStore("segment", () => {
   const duration = ref(0);
+  const selectCutId = ref<string | null>(null);
 
   const rawCuts = ref<Segment[]>([]);
   const cuts = readonly(
@@ -377,8 +454,33 @@ export const useSegmentStore = defineStore("segment", () => {
       });
     }),
   );
-  // const history = ref<Segment[][]>([]);
   const historyStore = useHistoryStore<Segment[]>({ limit: 30 });
+  const subtitleStore = useSubtitles();
+
+  const index = ref(0);
+
+  // 事件监听器
+  const eventListeners: SegmentEventCallback[] = [];
+
+  // 添加事件监听器
+  const on = (callback: SegmentEventCallback) => {
+    eventListeners.push(callback);
+  };
+
+  // 移除事件监听器
+  const off = (callback: SegmentEventCallback) => {
+    const idx = eventListeners.indexOf(callback);
+    if (idx > -1) {
+      eventListeners.splice(idx, 1);
+    }
+  };
+
+  // 触发事件
+  const emit = (type: SegmentEventType, data?: { segment?: Segment; id?: string }) => {
+    eventListeners.forEach((callback) => {
+      callback({ type, ...data });
+    });
+  };
 
   const recordHistory = () => {
     historyStore.add(rawCuts.value);
@@ -389,50 +491,230 @@ export const useSegmentStore = defineStore("segment", () => {
   const undo = () => {
     historyStore.undo();
     rawCuts.value = historyStore.state.value || [];
+    // 触发 clear 事件清空现有 regions,然后重新添加所有片段
+    emit("clear");
+    rawCuts.value.forEach((segment) => {
+      emit("add", { segment });
+    });
   };
   const redo = () => {
     historyStore.redo();
     rawCuts.value = historyStore.state.value || [];
+    // 触发 clear 事件清空现有 regions,然后重新添加所有片段
+    emit("clear");
+    rawCuts.value.forEach((segment) => {
+      emit("add", { segment });
+    });
   };
 
   const selectedCuts = computed(() => {
     return cuts.value.filter((item) => item.checked);
   });
 
-  const init = (segments: Segment[]) => {
-    rawCuts.value = segments;
-    recordHistory();
+  const selectedCut = computed(() => {
+    return cuts.value.find((item) => item.id === selectCutId.value);
+  });
+
+  const selectCut = (id: string | null) => {
+    selectCutId.value = id;
   };
-  const addSegment = (cut: Segment) => {
-    rawCuts.value.push(cut);
-    recordHistory();
+
+  const init = (segments: Omit<Segment, "id" | "index" | "loading">[]) => {
+    rawCuts.value = [];
+    index.value = 0; // 初始化 index
+    segments.forEach((segment) => {
+      if (!segment.start) segment.start = 0;
+      addSegment(segment);
+    });
   };
-  const removeSegment = (index: number) => {
-    rawCuts.value.splice(index, 1);
+  const addSegment = (cut: Omit<Segment, "id" | "index" | "loading">) => {
+    const data = {
+      id: uuid(),
+      ...cut,
+      index: index.value, // 新增 index 字段
+      loading: false,
+    };
+    rawCuts.value.push(data);
+    index.value++;
+    selectCutId.value = data.id; // 自动选中新添加的片段
     recordHistory();
+    emit("add", { segment: data });
   };
-  const updateSegment = <K extends keyof Segment>(index: number, key: K, value: Segment[K]) => {
-    const cut = rawCuts.value[index];
-    cut[key] = value;
+  const insertSegmentAfter = (afterId: string, cut: Omit<Segment, "id" | "index" | "loading">) => {
+    const targetIndex = rawCuts.value.findIndex((item) => item.id === afterId);
+    if (targetIndex === -1) return null;
+
+    const data = {
+      id: uuid(),
+      ...cut,
+      index: index.value,
+      loading: false,
+    };
+    rawCuts.value.splice(targetIndex + 1, 0, data);
+    index.value++;
+    selectCutId.value = data.id;
     recordHistory();
+    emit("add", { segment: data });
+    return data;
   };
-  const toggleSegment = (index: number) => {
-    rawCuts.value[index].checked = !rawCuts.value[index].checked;
+  const removeSegment = (id: string) => {
+    const idx = rawCuts.value.findIndex((item) => item.id === id);
+    if (idx !== -1) {
+      rawCuts.value.splice(idx, 1);
+      // 如果删除的是当前选中的片段，更新选中状态
+      if (selectCutId.value === id) {
+        if (rawCuts.value.length > 0) {
+          selectCutId.value = rawCuts.value[rawCuts.value.length - 1].id;
+        } else {
+          selectCutId.value = null;
+        }
+      }
+      // 级联删除关联的字幕
+      subtitleStore.removeBySourceId(id);
+
+      recordHistory();
+      emit("remove", { id });
+    }
+  };
+  const updateSegment = (
+    id: string,
+    options: Partial<Omit<Segment, "id">>,
+    ignoreHistory = false,
+  ) => {
+    const cut = rawCuts.value.find((item) => item.id === id);
+    if (cut) {
+      Object.assign(cut, options);
+      if (!ignoreHistory) {
+        recordHistory();
+      }
+      emit("update", { segment: cut });
+    }
+  };
+  const toggleSegment = (id: string) => {
+    const cut = rawCuts.value.find((item) => item.id === id);
+    if (cut) {
+      cut.checked = !cut.checked;
+      emit("update", { segment: cut });
+      recordHistory();
+    }
+  };
+  const mergeForward = (id: string) => {
+    const currentIndex = rawCuts.value.findIndex((item) => item.id === id);
+    if (currentIndex <= 0) return false; // 第一个片段不能向前合并
+
+    const currentSegment = rawCuts.value[currentIndex];
+    const previousSegment = rawCuts.value[currentIndex - 1];
+
+    // 更新片段时间
+    const start = Math.min(currentSegment.start, previousSegment.start);
+    const end = Math.max(currentSegment.end || 0, previousSegment.end || 0);
+    currentSegment.start = start;
+    currentSegment.end = end;
+
+    // 如果名称为空，使用前一个片段的名称
+    if (!currentSegment.name && previousSegment.name) {
+      currentSegment.name = previousSegment.name;
+    }
+    const previousSegmentLyrics = subtitleStore.getBySourceId(previousSegment.id)?.[0]?.content;
+    if (previousSegmentLyrics) {
+      const currentSegmentLyrics = subtitleStore.getBySourceId(currentSegment.id)?.[0]?.content;
+      subtitleStore.setForSegment(
+        currentSegment.id,
+        previousSegmentLyrics + (currentSegmentLyrics ? `\n${currentSegmentLyrics}` : ""),
+      );
+    }
+
+    // 删除前一个片段
+    rawCuts.value.splice(currentIndex - 1, 1);
+
     recordHistory();
+    emit("update", { segment: currentSegment });
+    emit("remove", { id: previousSegment.id });
+    return true;
+  };
+  const mergeBackward = (id: string) => {
+    const currentIndex = rawCuts.value.findIndex((item) => item.id === id);
+    if (currentIndex === -1 || currentIndex >= rawCuts.value.length - 1) return false; // 最后一个片段不能向后合并
+
+    const currentSegment = rawCuts.value[currentIndex];
+    const nextSegment = rawCuts.value[currentIndex + 1];
+
+    const start = Math.min(currentSegment.start, nextSegment.start);
+    const end = Math.max(currentSegment.end || 0, nextSegment.end || 0);
+    // 更新片段时间
+    currentSegment.start = start;
+    currentSegment.end = end;
+    // 如果名称为空，使用后一个片段的名称
+    if (!currentSegment.name && nextSegment.name) {
+      currentSegment.name = nextSegment.name;
+    }
+    const nextSegmentLyrics = subtitleStore.getBySourceId(nextSegment.id)?.[0]?.content;
+    if (nextSegmentLyrics) {
+      const currentSegmentLyrics = subtitleStore.getBySourceId(currentSegment.id)?.[0]?.content;
+      subtitleStore.setForSegment(
+        currentSegment.id,
+        currentSegmentLyrics ? `${currentSegmentLyrics}\n${nextSegmentLyrics}` : nextSegmentLyrics,
+      );
+    }
+
+    // 删除后一个片段
+    rawCuts.value.splice(currentIndex + 1, 1);
+
+    recordHistory();
+    emit("update", { segment: currentSegment });
+    emit("remove", { id: nextSegment.id });
+    return true;
+  };
+  const clear = () => {
+    rawCuts.value = [];
+    index.value = 0; // 清空时初始化 index
+    selectCutId.value = null; // 重置选中状态
+
+    // 清空所有字幕
+    subtitleStore.clear();
+
+    recordHistory();
+    emit("clear");
+  };
+
+  // 获取所有选中片段的合并字幕文本
+  const getCombinedLyrics = () => {
+    // 获取选中的片段（需要有 end 值）
+    const segments = cuts.value.map((seg) => ({
+      id: seg.id,
+      start: seg.start,
+      end: seg.end,
+    }));
+    const content = subtitleStore.getCombinedForSegments(segments);
+    return content;
   };
 
   return {
     cuts,
     selectedCuts,
+    selectedCut,
+    selectCutId,
+    selectCut,
     duration,
     rawCuts,
     addSegment,
+    insertSegmentAfter,
     removeSegment,
     updateSegment,
     toggleSegment,
+    mergeForward,
+    mergeBackward,
     clearHistory,
     undo,
     redo,
     init,
+    clear,
+    on,
+    off,
+    index,
+    getCombinedLyrics,
   };
 });
+
+// 导出字幕 Store
+export { useSubtitles, type SubtitleItem } from "./subtitles";

@@ -1,4 +1,3 @@
-import { parse, format } from "node:url";
 import WebSocket from "ws";
 import { TypedEmitter } from "tiny-typed-emitter";
 
@@ -16,24 +15,9 @@ import type {
   RoomStatsMessage,
   RoomRankMessage,
   Message,
+  PrivilegeScreenChatMessage,
+  ScreenChatMessage,
 } from "../types/types.js";
-
-function buildRequestUrl(url: string): string {
-  const parsedUrl = parse(url, true);
-  const existingParams = parsedUrl.query;
-
-  existingParams["aid"] = "6383";
-  existingParams["device_platform"] = "web";
-  existingParams["browser_language"] = "zh-CN";
-  existingParams["browser_platform"] = "Win32";
-  existingParams["browser_name"] = "Mozilla";
-  existingParams["browser_version"] = "92.0.4515.159";
-
-  parsedUrl.search = null;
-  parsedUrl.query = existingParams;
-
-  return format(parsedUrl);
-}
 
 interface Events {
   init: (url: string) => void;
@@ -50,6 +34,8 @@ interface Events {
   roomUserSeq: (message: RoomUserSeqMessage) => void;
   roomStats: (message: RoomStatsMessage) => void;
   roomRank: (message: RoomRankMessage) => void;
+  privilegeScreenChat: (message: PrivilegeScreenChatMessage) => void;
+  screenChat: (message: ScreenChatMessage) => void;
   message: (message: Message) => void;
 }
 
@@ -62,11 +48,14 @@ class DouYinDanmaClient extends TypedEmitter<Events> {
   private autoStart: boolean;
   private autoReconnect: number;
   private reconnectAttempts: number;
+  private reconnectInterval: number;
   private cookie?: string;
   private timeoutInterval: number;
   private lastMessageTime: number;
   private timeoutTimer!: NodeJS.Timeout;
   private isTimeoutCheckRunning: boolean = false;
+  private isReconnecting: boolean = false;
+  private host: string;
 
   constructor(
     roomId: string,
@@ -74,8 +63,10 @@ class DouYinDanmaClient extends TypedEmitter<Events> {
       autoStart?: boolean;
       autoReconnect?: number;
       heartbeatInterval?: number;
+      reconnectInterval?: number;
       cookie?: string;
       timeoutInterval?: number;
+      host?: string;
     } = {},
   ) {
     super();
@@ -84,9 +75,11 @@ class DouYinDanmaClient extends TypedEmitter<Events> {
     this.autoStart = options.autoStart ?? false;
     this.autoReconnect = options.autoReconnect ?? 10;
     this.reconnectAttempts = 0;
+    this.reconnectInterval = options.reconnectInterval ?? 10000;
     this.cookie = options.cookie;
     this.timeoutInterval = options.timeoutInterval ?? 100000; // 默认100秒
     this.lastMessageTime = Date.now();
+    this.host = options.host ?? "webcast100-ws-web-hl.douyin.com";
 
     if (this.autoStart) {
       this.connect();
@@ -94,39 +87,50 @@ class DouYinDanmaClient extends TypedEmitter<Events> {
   }
 
   async connect() {
-    const url = await this.getWsInfo(this.roomId);
-    if (!url) {
-      this.emit("error", new Error("获取抖音弹幕签名失败"));
-      return;
+    try {
+      const url = await this.getWsInfo(this.roomId);
+      if (!url) {
+        throw new Error("获取抖音弹幕签名失败");
+      }
+      this.emit("init", url);
+      const cookies = this.cookie || (await getCookie());
+      this.ws = new WebSocket(url, {
+        headers: {
+          Cookie: cookies,
+          "User-Agent":
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36",
+          Origin: "https://live.douyin.com",
+          Referer: "https://live.douyin.com/",
+        },
+      });
+
+      this.ws.on("open", () => {
+        this.emit("open");
+        this.startHeartbeat();
+        this.startTimeoutCheck();
+      });
+
+      this.ws.on("message", (data) => {
+        this.lastMessageTime = Date.now();
+        this.decode(data as Buffer);
+      });
+
+      this.ws.on("close", () => {
+        this.emit("close");
+        this.reconnect();
+      });
+
+      this.ws.on("error", (error) => {
+        this.emit("error", error);
+        this.reconnect();
+      });
+    } catch (err) {
+      // getWsInfo/getCookie 等前置步骤失败时，必须让错误可见并继续重试：
+      // 否则 WebSocket 不会创建，没有任何事件能触发下一次 reconnect，
+      // 弹幕客户端将静默死亡直到录制结束
+      this.emit("error", err as Error);
+      this.reconnect();
     }
-    this.emit("init", url);
-    const cookies = this.cookie || (await getCookie());
-    this.ws = new WebSocket(url, {
-      headers: {
-        Cookie: cookies,
-      },
-    });
-
-    this.ws.on("open", () => {
-      this.emit("open");
-      this.startHeartbeat();
-      this.startTimeoutCheck();
-    });
-
-    this.ws.on("message", (data) => {
-      this.lastMessageTime = Date.now();
-      this.decode(data as Buffer);
-    });
-
-    this.ws.on("close", () => {
-      this.emit("close");
-      this.reconnect();
-    });
-
-    this.ws.on("error", (error) => {
-      this.emit("error", error);
-      this.reconnect();
-    });
   }
 
   send(data: any) {
@@ -143,7 +147,10 @@ class DouYinDanmaClient extends TypedEmitter<Events> {
     this.reconnectAttempts = this.autoReconnect;
     this.stopHeartbeat();
     this.stopTimeoutCheck();
-    this.ws.close();
+
+    if (this.ws.readyState === WebSocket.OPEN) {
+      this.ws.close();
+    }
   }
 
   private startHeartbeat() {
@@ -200,12 +207,21 @@ class DouYinDanmaClient extends TypedEmitter<Events> {
   }
 
   private reconnect() {
+    if (this.isReconnecting) {
+      return;
+    }
+
     this.stopHeartbeat();
     this.stopTimeoutCheck();
+
     if (this.reconnectAttempts < this.autoReconnect) {
+      this.isReconnecting = true;
       this.reconnectAttempts++;
-      this.connect();
-      this.emit("reconnect", this.reconnectAttempts);
+      setTimeout(() => {
+        this.connect();
+        this.isReconnecting = false;
+        this.emit("reconnect", this.reconnectAttempts);
+      }, this.reconnectInterval);
     }
   }
 
@@ -275,6 +291,16 @@ class DouYinDanmaClient extends TypedEmitter<Events> {
     this.emit("message", message);
   }
 
+  async handlePrivilegeScreenChatMessage(message: PrivilegeScreenChatMessage) {
+    this.emit("privilegeScreenChat", message);
+    this.emit("message", message);
+  }
+
+  async handleScreenChatMessage(message: ScreenChatMessage) {
+    this.emit("screenChat", message);
+    this.emit("message", message);
+  }
+
   /**
    * 处理其他消息
    */
@@ -303,6 +329,10 @@ class DouYinDanmaClient extends TypedEmitter<Events> {
     const RoomStatsMessage = protobuf.douyin.RoomStatsMessage;
     // @ts-ignore
     const RoomRankMessage = protobuf.douyin.RoomRankMessage;
+    // @ts-ignore
+    const PrivilegeScreenChatMessage = protobuf.douyin.PrivilegeScreenChatMessage;
+    // @ts-ignore
+    const ScreenChatMessage = protobuf.douyin.ScreenChatMessage;
     const wssPackage = PushFrame.decode(data);
 
     // @ts-ignore
@@ -364,6 +394,12 @@ class DouYinDanmaClient extends TypedEmitter<Events> {
         } else if (msg.method === "WebcastRoomRankMessage") {
           const message = RoomRankMessage.decode(msg.payload);
           this.handleRoomRankMessage(message.toJSON() as RoomRankMessage);
+        } else if (msg.method === "WebcastPrivilegeScreenChatMessage") {
+          const message = PrivilegeScreenChatMessage.decode(msg.payload);
+          this.handlePrivilegeScreenChatMessage(message.toJSON() as PrivilegeScreenChatMessage);
+        } else if (msg.method === "WebcastScreenChatMessage") {
+          const message = ScreenChatMessage.decode(msg.payload);
+          this.handleScreenChatMessage(message.toJSON() as ScreenChatMessage);
         } else {
           // WebcastRanklistHourEntranceMessage,WebcastInRoomBannerMessage,WebcastRoomStreamAdaptationMessage
         }
@@ -380,7 +416,7 @@ class DouYinDanmaClient extends TypedEmitter<Events> {
     const userUniqueId = getUserUniqueId();
     // const userUniqueId = "7877922945687137703";
     const versionCode = 180800;
-    const webcastSdkVersion = "1.0.14-beta.0";
+    const webcastSdkVersion = "1.0.15";
 
     const sigParams = {
       live_id: "1",
@@ -407,19 +443,39 @@ class DouYinDanmaClient extends TypedEmitter<Events> {
     }
 
     const webcast5Params = {
+      app_name: "douyin_web",
       room_id: roomId,
       compress: "gzip",
       version_code: String(versionCode),
       webcast_sdk_version: webcastSdkVersion,
+      update_version_code: webcastSdkVersion,
       live_id: "1",
       did_rule: "3",
       user_unique_id: userUniqueId,
       identity: "audience",
       signature: signature.toString(),
+      device_platform: "web",
+      cookie_enabled: "true",
+      screen_width: "1920",
+      screen_height: "1080",
+      browser_language: "zh-CN",
+      browser_platform: "Win32",
+      browser_name: "Mozilla",
+      browser_version:
+        "5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36",
+      browser_online: "true",
+      tz_name: "Etc/GMT-8",
+      host: "https://live.douyin.com",
+      aid: "6383",
+      endpoint: "live_pc",
+      support_wrds: "1",
+      im_path: "/webcast/im/fetch/",
+      need_persist_msg_count: "15",
+      heartbeatDuration: "0",
     };
 
-    const wssUrl = `wss://webcast5-ws-web-lf.douyin.com/webcast/im/push/v2/?${new URLSearchParams(webcast5Params).toString()}`;
-    return buildRequestUrl(wssUrl);
+    const wssUrl = `wss://${this.host}/webcast/im/push/v2/?${new URLSearchParams(webcast5Params).toString()}`;
+    return wssUrl;
   }
 }
 

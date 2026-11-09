@@ -2,10 +2,11 @@
   <n-table :bordered="false" :single-line="false">
     <thead>
       <tr>
-        <th>房间号</th>
-        <th>主播名</th>
-        <th>标题</th>
-        <th @click="handleSort('living')" class="sortable-header">
+        <th v-if="isColumnVisible('channelId')">房间号</th>
+        <th v-if="isColumnVisible('owner')">主播名</th>
+        <th v-if="isColumnVisible('remark')">备注</th>
+        <th v-if="isColumnVisible('roomTitle')">标题</th>
+        <th v-if="isColumnVisible('living')" @click="handleSort('living')" class="sortable-header">
           直播状态
           <n-icon
             size="14"
@@ -18,7 +19,7 @@
             <ArrowUpOutline></ArrowUpOutline>
           </n-icon>
         </th>
-        <th @click="handleSort('state')" class="sortable-header">
+        <th v-if="isColumnVisible('state')" @click="handleSort('state')" class="sortable-header">
           录制状态
           <n-icon
             size="14"
@@ -31,8 +32,13 @@
             <ArrowUpOutline></ArrowUpOutline>
           </n-icon>
         </th>
-        <td>录制参数</td>
-        <th @click="handleSort('monitorStatus')" class="sortable-header">
+        <td v-if="isColumnVisible('recordParams')">录制参数</td>
+        <th v-if="isColumnVisible('lastRecordTime')">上次录制</th>
+        <th
+          v-if="isColumnVisible('monitorStatus')"
+          @click="handleSort('monitorStatus')"
+          class="sortable-header"
+        >
           监听状态
           <n-icon
             size="14"
@@ -45,17 +51,28 @@
             <ArrowUpOutline></ArrowUpOutline>
           </n-icon>
         </th>
-        <th>操作</th>
+        <th v-if="isColumnVisible('actions')">操作</th>
       </tr>
     </thead>
     <tbody>
       <tr v-for="item in props.list" :key="item.channelId">
-        <td>
+        <td v-if="isColumnVisible('channelId')">
           <a class="link" target="_blank" :href="item.channelURL">{{ item.channelId }}</a>
         </td>
-        <td>{{ item.owner || item.remarks }}</td>
-        <td>{{ item.roomTitle }}</td>
+        <td v-if="isColumnVisible('owner')">
+          <div style="display: flex; align-items: center">
+            <img
+              :src="item.avatar"
+              referrerpolicy="no-referrer"
+              style="width: 25px; height: 25px; border-radius: 50%; margin-right: 4px"
+            />
+            <span>{{ item.owner || item.remarks }}</span>
+          </div>
+        </td>
+        <td v-if="isColumnVisible('remark')">{{ item.remarks }}</td>
+        <td v-if="isColumnVisible('roomTitle')">{{ item.roomTitle }}</td>
         <td
+          v-if="isColumnVisible('living')"
           :style="{
             color: item.living ? 'skyblue' : 'normal',
           }"
@@ -63,27 +80,56 @@
           {{ item.living ? "直播中" : "未开始" }}
         </td>
         <td
+          v-if="isColumnVisible('state')"
           :class="{
             recording: item.state === 'recording',
             error: item.state === 'check-error',
+            'title-blocked': item.state === 'title-blocked',
+            'charge-skipped': item.state === 'charge-skipped',
           }"
         >
-          {{ stateMap[item.state] }}
+          {{
+            item.state === "charge-skipped"
+              ? ["paid", "guard"].includes(item.liveInfo?.liveType ?? "")
+                ? "付费直播 / 无法录制"
+                : "无法录制"
+              : stateMap[item.state]
+          }}
         </td>
-        <td :title="item?.recordHandle?.url">
-          {{ item.state === "recording" ? `${item.usedSource}/${item.usedStream}` : "" }}
+        <td v-if="isColumnVisible('recordParams')" :title="item?.recordHandle?.url">
+          {{
+            item.state === "recording"
+              ? `${item.area}/${item.usedSource}/${item.usedStream}/${item?.recordHandle?.recorderType}`
+              : ""
+          }}
         </td>
-        <td>
+        <td v-if="isColumnVisible('lastRecordTime')">
+          {{ item?.extra?.lastRecordTime ? formatTime(item?.extra?.lastRecordTime) : "-" }}
+        </td>
+        <td v-if="isColumnVisible('monitorStatus')">
           {{
             item.disableAutoCheck
               ? "手动"
-              : `自动${item.tempStopIntervalCheck && !item.disableAutoCheck ? "(跳过本场直播)" : ""}`
+              : `自动${item.tempStopIntervalCheck && !item.disableAutoCheck ? "(跳过本场)" : ""}`
           }}
         </td>
-        <td>
+        <td v-if="isColumnVisible('actions')">
+          <span
+            style="cursor: pointer; color: var(--color-error); margin-right: 4px"
+            v-if="item.state === 'recording'"
+            @click="emit('stopRecord', item.id)"
+            >停止</span
+          >
+          <span
+            style="cursor: pointer; color: var(--color-primary); margin-right: 4px"
+            @click="emit('startRecord', item.id)"
+            v-else
+            >开始</span
+          >
+
           <n-popover placement="right-start" trigger="hover">
             <template #trigger>
-              <span style="cursor: pointer; color: skyblue">编辑</span>
+              <span style="cursor: pointer; color: skyblue">操作</span>
             </template>
             <slot name="action" :item="item"></slot>
           </n-popover>
@@ -94,6 +140,7 @@
 </template>
 
 <script setup lang="ts">
+import { formatTime } from "@renderer/utils";
 import { ArrowUpOutline } from "@vicons/ionicons5";
 
 interface Props {
@@ -104,6 +151,7 @@ interface Props {
     state: string;
     monitorStatus: string;
   };
+  visibleColumns?: string[];
 }
 
 const props = withDefaults(defineProps<Props>(), {
@@ -114,10 +162,21 @@ const props = withDefaults(defineProps<Props>(), {
     state: "desc",
     monitorStatus: "desc",
   }),
+  visibleColumns: () => [],
 });
+
+// 检查列是否可见
+const isColumnVisible = (columnKey: string) => {
+  if (!props.visibleColumns || props.visibleColumns.length === 0) {
+    return true; // 如果没有配置，则显示所有列
+  }
+  return props.visibleColumns.includes(columnKey);
+};
 
 const emit = defineEmits<{
   (e: "sort", field: string): void;
+  (e: "startRecord", channelId: string): void;
+  (e: "stopRecord", channelId: string): void;
 }>();
 
 const handleSort = (field: string) => {
@@ -129,6 +188,8 @@ const stateMap = {
   recording: "录制中",
   "check-error": "检查错误",
   "stopping-record": "停止中",
+  "title-blocked": "标题屏蔽",
+  "charge-skipped": "无法录制",
 };
 </script>
 
@@ -140,7 +201,8 @@ const stateMap = {
 .recording {
   color: skyblue;
 }
-.error {
+.error,
+.title-blocked {
   color: #ff4d4f;
 }
 .sort-icon {
@@ -157,6 +219,12 @@ const stateMap = {
   }
   &.asc {
     transform: rotate(180deg);
+  }
+}
+
+tr:hover {
+  > td {
+    background-color: var(--n-th-color);
   }
 }
 </style>

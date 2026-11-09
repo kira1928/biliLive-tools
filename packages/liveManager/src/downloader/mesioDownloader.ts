@@ -1,0 +1,267 @@
+import path from "node:path";
+import EventEmitter from "node:events";
+import { spawn, ChildProcess } from "node:child_process";
+
+import { DEFAULT_USER_AGENT } from "./index.js";
+import { StreamManager, getMesioPath } from "../index.js";
+import { IDownloader, MesioRecorderOptions, Segment } from "./IDownloader.js";
+
+class MesioCommand extends EventEmitter {
+  private _input: string = "";
+  private _output: string = "";
+  private _inputOptions: string[] = [];
+  private process: ChildProcess | null = null;
+
+  constructor() {
+    super();
+  }
+
+  input(source: string): MesioCommand {
+    this._input = source;
+    return this;
+  }
+
+  output(target: string): MesioCommand {
+    this._output = target;
+    return this;
+  }
+
+  inputOptions(options: string[]): MesioCommand;
+  inputOptions(...options: string[]): MesioCommand;
+  inputOptions(...options: any[]): MesioCommand {
+    const opts = Array.isArray(options[0]) ? options[0] : options;
+    this._inputOptions.push(...opts);
+    return this;
+  }
+
+  _getArguments(): string[] {
+    const args: string[] = [];
+
+    // Add input options first
+    args.push(...this._inputOptions);
+
+    // Add output target
+    if (this._output) {
+      const { dir, name } = path.parse(this._output);
+      args.push("-o", dir);
+      args.push("-n", name);
+    }
+    // args.push("-v");
+
+    // Add input source
+    if (this._input) {
+      args.push(this._input);
+    }
+
+    return args;
+  }
+
+  run(): void {
+    const args = this._getArguments();
+    const mesioExecutable = getMesioPath();
+
+    this.process = spawn(mesioExecutable, args, {
+      stdio: ["pipe", "pipe", "pipe"],
+      windowsHide: true,
+    });
+
+    if (this.process.stdout) {
+      this.process.stdout.on("data", (data) => {
+        const output = data.toString();
+        // console.log(output);
+        this.emit("stderr", output);
+      });
+    }
+
+    if (this.process.stderr) {
+      this.process.stderr.on("data", (data) => {
+        const output = data.toString();
+        // console.error(output);
+        this.emit("stderr", output);
+      });
+    }
+
+    this.process.on("error", (error) => {
+      this.emit("error", error);
+    });
+    [];
+    this.process.on("close", (code) => {
+      if (code === 0) {
+        this.emit("end");
+      } else {
+        this.emit("error", new Error(`mesio process exited with code ${code}`));
+      }
+    });
+  }
+
+  kill(): void {
+    if (this.process) {
+      this.process.stdin?.write("q");
+      this.process.stdin?.end();
+    }
+  }
+}
+
+// Factory function similar to createFFMPEGBuilder
+export const createMesioBuilder = (): MesioCommand => {
+  return new MesioCommand();
+};
+
+export class mesioDownloader extends EventEmitter implements IDownloader {
+  public type = "mesio" as const;
+  private command: MesioCommand;
+  private streamManager: StreamManager;
+  readonly hasSegment: boolean;
+  readonly getSavePath: (data: { startTime: number; title?: string }) => string;
+  readonly segment: Segment;
+  readonly inputOptions: string[] = [];
+  readonly disableDanma: boolean = false;
+  readonly url: string;
+  readonly debugLevel: "none" | "basic" | "verbose" = "none";
+  readonly proxy?: string;
+  readonly headers:
+    | {
+        [key: string]: string | undefined;
+      }
+    | undefined;
+
+  constructor(
+    opts: MesioRecorderOptions,
+    private onEnd: (...args: unknown[]) => void,
+    private onUpdateLiveInfo: () => Promise<{ title?: string; cover?: string }>,
+  ) {
+    super();
+    // 存在自动分段，永远为true
+    const hasSegment = true;
+    this.hasSegment = hasSegment;
+    this.disableDanma = opts.disableDanma ?? false;
+    this.debugLevel = opts.debugLevel ?? "none";
+    this.proxy = opts.proxy;
+
+    let videoFormat: "flv" | "ts" | "m4s" = "flv";
+    if (opts.url.includes(".m3u8")) {
+      videoFormat = "ts";
+    }
+    if (opts.formatName === "fmp4") {
+      videoFormat = "m4s";
+    } else if (opts.formatName === "ts") {
+      videoFormat = "ts";
+    } else if (opts.formatName === "flv") {
+      videoFormat = "flv";
+    }
+
+    this.streamManager = new StreamManager(
+      opts.getSavePath,
+      hasSegment,
+      this.disableDanma,
+      "mesio",
+      videoFormat,
+      {
+        onUpdateLiveInfo: this.onUpdateLiveInfo,
+      },
+    );
+    this.getSavePath = opts.getSavePath;
+    this.inputOptions = [];
+    this.url = opts.url;
+    this.segment = opts.segment;
+    this.headers = {
+      "User-Agent": DEFAULT_USER_AGENT,
+      ...(opts.headers || {}),
+    };
+
+    this.command = this.createCommand();
+
+    this.streamManager.on("videoFileCreated", ({ filename, cover, rawFilename, title }) => {
+      this.emit("videoFileCreated", { filename, cover, rawFilename, title });
+    });
+    this.streamManager.on("videoFileCompleted", (data) => {
+      this.emit("videoFileCompleted", data);
+    });
+    this.streamManager.on("DebugLog", (data) => {
+      this.emit("DebugLog", data);
+    });
+  }
+
+  createCommand() {
+    const inputOptions = [...this.inputOptions, "--fix", "--disable-log-file"];
+    if (this.proxy) {
+      try {
+        const { protocol, username, password, origin, search, pathname } = new URL(this.proxy);
+        if (protocol.startsWith("https")) {
+          inputOptions.push("--proxy-type", "https");
+        } else if (protocol.startsWith("socks5")) {
+          inputOptions.push("--proxy-type", "socks5");
+        }
+        if (username && password) {
+          inputOptions.push("--proxy-user", `${username}`);
+          inputOptions.push("--proxy-pass", `${password}`);
+        }
+        inputOptions.push("--proxy", origin + pathname + search);
+      } catch (err) {
+        this.emit("DebugLog", { type: "error", text: `Invalid proxy URL: ${this.proxy}` });
+      }
+    } else {
+      inputOptions.push("--no-proxy");
+    }
+    if (this.debugLevel === "verbose") {
+      inputOptions.push("-v");
+    }
+
+    if (this.headers) {
+      Object.entries(this.headers).forEach(([key, value]) => {
+        if (!value) return;
+        inputOptions.push("-H", `${key}: ${value}`);
+      });
+    }
+    if (this.segment) {
+      if (typeof this.segment === "number") {
+        inputOptions.push("-d", `${this.segment * 60}s`);
+      } else if (typeof this.segment === "string") {
+        inputOptions.push("-m", this.segment);
+      }
+    }
+
+    const command = createMesioBuilder()
+      .input(this.url)
+      .inputOptions(inputOptions)
+      .output(this.streamManager.videoFilePath)
+      .on("error", this.onEnd)
+      .on("end", () => this.onEnd("finished"))
+      .on("stderr", async (stderrLine) => {
+        this.emit("DebugLog", { type: "ffmpeg", text: stderrLine });
+        await this.streamManager.handleVideoStarted(stderrLine);
+      });
+
+    return command;
+  }
+
+  public run() {
+    this.command.run();
+  }
+
+  public getArguments() {
+    return this.command._getArguments();
+  }
+
+  public async stop() {
+    try {
+      this.command.kill();
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+      await this.streamManager.handleVideoCompleted();
+    } catch (err) {
+      this.emit("DebugLog", { type: "error", text: String(err) });
+    }
+  }
+
+  public getExtraDataController() {
+    return this.streamManager?.getExtraDataController();
+  }
+
+  public get videoFilePath() {
+    return this.streamManager.videoFilePath;
+  }
+
+  public cut(): void {
+    throw new Error("Mesio downloader does not support cut operation.");
+  }
+}

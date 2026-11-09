@@ -1,7 +1,15 @@
 <template>
   <n-card class="login-card">
+    <h3 style="text-align: center">
+      {{ isFullstack ? "请配置密钥进行登录" : "请配置API地址和密钥进行登录" }}
+    </h3>
+
     <n-space vertical style="text-align: center">
-      <n-input v-model:value="api" placeholder="请输入API地址，如http://127.0.0.1:18010" />
+      <n-input
+        v-if="!isFullstack"
+        v-model:value="api"
+        placeholder="请输入API地址，如http://127.0.0.1:18010"
+      />
       <n-input v-model:value="key" placeholder="密钥" type="password" />
       <div style="gap: 10px; display: flex">
         <n-button type="warning" style="flex: 1" @click="test">联通测试</n-button>
@@ -44,15 +52,9 @@ const api = ref("");
 const key = ref("");
 
 const login = async () => {
-  if (!api.value || !key.value) {
-    notice.error({ title: "请输入API地址和密钥", duration: 1000 });
-    return;
-  }
-  const serverVersion = await commonApi.versionTest(api.value, key.value);
-  if (serverVersion.includes('id="app"')) {
-    notice.error({ title: "不要使用前端地址啊！！", duration: 1000 });
-    return;
-  }
+  const confirm = await test();
+  if (!confirm) return;
+
   window.localStorage.setItem("api", api.value);
   window.localStorage.setItem("key", key.value);
   router.push({ name: "Home" });
@@ -86,26 +88,34 @@ const test = async () => {
         duration: 5000,
       });
     }
+    return true;
   } catch (error) {
     if (error === "Forbidden") {
       notice.error({ title: "密钥错误", duration: 5000 });
       return;
     }
-    notice.error({ title: "无法连接，请检查配置", duration: 5000 });
+    notice.error({ title: "无法连接，请检查配置，API地址可能有误", duration: 5000 });
+    return false;
   }
 };
 
-const apiStorage = window.localStorage.getItem("api");
+// const apiStorage = window.localStorage.getItem("api");
 // const keyStorage = window.localStorage.getItem("key");
-api.value = apiStorage || import.meta.env.VITE_DEFAULT_SERVER || "http://127.0.0.1:18010";
+
+api.value =
+  import.meta.env.VITE_DEFAULT_SERVER ||
+  `${window.location.protocol}//${window.location.hostname}:18010`;
 // key.value = keyStorage || "";
+const isFullstack = ref(window.isFullstack);
+if (window.localStorage.getItem("api")) {
+  window.localStorage.removeItem("api");
+  window.location.reload();
+}
 </script>
 
 <style lang="less">
 body {
-  @media screen and (prefers-color-scheme: dark) {
-    background-color: #18181c;
-  }
+  background-color: var(--bg-primary);
 }
 </style>
 

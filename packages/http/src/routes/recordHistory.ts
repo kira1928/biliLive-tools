@@ -10,19 +10,32 @@ const router = new Router({
   prefix: "/record-history",
 });
 
+const resolveVideoFileExt = (videoFile: string) => {
+  const extname = path.extname(videoFile).toLowerCase();
+  switch (extname) {
+    case ".flv":
+      return "flv";
+    case ".ts":
+      return "ts";
+    default:
+      return "";
+  }
+};
+
 /**
  * 查询直播记录
  * @route GET /record-history/list
  * @param {string} room_id - 房间号
  * @param {string} platform - 平台
+ * @param {string} [liveId] - 直播ID
  * @param {number} [page=1] - 页码
  * @param {number} [pageSize=100] - 每页条数
  * @param {number} [startTime] - 开始时间（时间戳）
  * @param {number} [endTime] - 结束时间（时间戳）
- * @returns 返回数据包含弹幕密度字段（弹幕数量/视频时长，单位：条/秒）
+ * @returns
  */
 router.get("/list", async (ctx) => {
-  const { room_id, platform, page, pageSize, startTime, endTime } = ctx.query;
+  const { room_id, platform, liveId, page, pageSize, startTime, endTime } = ctx.query;
 
   if (!room_id || !platform) {
     ctx.status = 400;
@@ -37,6 +50,7 @@ router.get("/list", async (ctx) => {
     const result = recordHistory.queryRecordsByRoomAndPlatform({
       room_id: room_id as string,
       platform: platform as string,
+      liveId: liveId ? String(liveId) : undefined,
       page: page ? parseInt(page as string) : undefined,
       pageSize: pageSize ? parseInt(pageSize as string) : undefined,
       startTime: startTime ? parseInt(startTime as string) : undefined,
@@ -49,7 +63,7 @@ router.get("/list", async (ctx) => {
       danma_density:
         record.danma_num && record.video_duration && record.video_duration > 0
           ? Math.round((record.danma_num / record.video_duration) * 100) / 100 // 保留两位小数
-          : null,
+          : 0,
     }));
 
     ctx.body = {
@@ -109,6 +123,11 @@ router.delete("/:id", async (ctx) => {
   }
 });
 
+/**
+ * 获取视频文件路径
+ * @param id 记录ID
+ * @returns
+ */
 const getVideoFile = async (id: number): Promise<string | null> => {
   const data = recordHistory.getRecordById(id);
   if (!data) {
@@ -127,35 +146,60 @@ const getVideoFile = async (id: number): Promise<string | null> => {
   return null;
 };
 
+const createVideoFileResponse = async (videoFile: string) => {
+  const stats = await fs.stat(videoFile);
+
+  return {
+    videoFilePath: videoFile,
+    videoFileId: fileCache.setFile(videoFile),
+    videoFileExt: resolveVideoFileExt(videoFile),
+    videoFileSize: stats.size,
+    videoFileUpdatedAt: stats.mtimeMs,
+  };
+};
+
 /**
- * 获取视频文件
- * @route GET /record-history/video/:id
- * @param {string} video_file - 视频文件路径
+ * 获取弹幕文件路径，优先查询ass文件，其次查询xml文件
+ * @param videoFile 视频文件路径
+ * @returns 弹幕文件路径
  */
-router.get("/video/:id", async (ctx) => {
-  const { id } = ctx.params;
+const getDanmaFile = async (
+  videoFile: string,
+): Promise<{
+  file: string;
+  ext: string;
+} | null> => {
+  const assFile = replaceExtName(videoFile, ".ass");
+  if (await fs.pathExists(assFile)) {
+    return { file: assFile, ext: "ass" };
+  }
+  const danmaFile = replaceExtName(videoFile, ".xml");
+  if (await fs.pathExists(danmaFile)) {
+    return { file: danmaFile, ext: "xml" };
+  }
+  return null;
+};
 
-  if (!id || isNaN(parseInt(id))) {
-    ctx.status = 400;
-    ctx.body = "记录ID不能为空且必须为数字";
+const createDanmaFileResponse = async (videoFile: string) => {
+  const danmaFile = await getDanmaFile(videoFile);
+  let danmaFileId: string | null = null;
+  if (danmaFile) {
+    danmaFileId = fileCache.setFile(danmaFile.file);
   }
 
-  const file = await getVideoFile(parseInt(id));
-  if (file) {
-    ctx.body = file;
-    return;
-  }
-
-  ctx.status = 400;
-  ctx.body = "视频文件不存在";
-});
+  return {
+    danmaFilePath: danmaFile?.file || null,
+    danmaFileId,
+    danmaFileExt: danmaFile?.ext || null,
+  };
+};
 
 /**
- * 下载视频文件
- * @route GET /record-history/download/:id
+ * 获取历史记录文件信息
+ * @route GET /record-history/file/:id
  * @param {number} id - 记录ID
  */
-router.get("/download/:id", async (ctx) => {
+router.get("/file/:id", async (ctx) => {
   const { id } = ctx.params;
 
   if (!id || isNaN(parseInt(id))) {
@@ -163,26 +207,115 @@ router.get("/download/:id", async (ctx) => {
     ctx.body = "记录ID不能为空且必须为数字";
   }
 
-  const file = await getVideoFile(parseInt(id));
-  if (!file) {
+  const videoFile = await getVideoFile(parseInt(id));
+  if (!videoFile) {
     ctx.status = 400;
     ctx.body = "视频文件不存在";
     return;
   }
-  const extname = path.extname(file).toLowerCase();
+  const videoInfo = await createVideoFileResponse(videoFile);
+  const danmaInfo = await createDanmaFileResponse(videoFile);
 
-  const fileId = fileCache.setFile(file);
-  let type = "";
-  switch (extname) {
-    case ".flv":
-      type = "flv";
-      break;
-    case ".ts":
-      type = "ts";
-      break;
+  ctx.body = {
+    ...videoInfo,
+    ...danmaInfo,
+  };
+});
+
+router.get("/recent-clips", async (ctx) => {
+  const { room_id, platform, liveId } = ctx.query;
+
+  if (!room_id || !platform) {
+    ctx.status = 400;
+    ctx.body = {
+      code: 400,
+      message: "房间号和平台不能为空",
+    };
+    return;
   }
 
-  ctx.body = { fileId, type };
+  try {
+    const recentCandidates = recordHistory.queryRecentClipsByRoomAndPlatform({
+      room_id: String(room_id),
+      platform: String(platform),
+      liveId: liveId ? String(liveId) : undefined,
+      candidateLimit: 15,
+    });
+
+    const items: Array<{
+      id: number;
+      title: string;
+      liveStartTime?: number;
+      recordStartTime: number;
+      recordEndTime?: number;
+      videoDuration?: number;
+      videoFilePath: string;
+      videoFileId: string;
+      videoFileExt: string;
+      videoFileSize: number;
+      videoFileUpdatedAt: number;
+    }> = [];
+
+    for (const clip of recentCandidates) {
+      if (items.length >= 5) break;
+
+      try {
+        const videoFile = await getVideoFile(clip.id);
+        if (!videoFile) continue;
+
+        const videoInfo = await createVideoFileResponse(videoFile);
+        items.push({
+          id: clip.id,
+          title: clip.title,
+          liveStartTime: clip.live_start_time,
+          recordStartTime: clip.record_start_time,
+          recordEndTime: clip.record_end_time,
+          videoDuration: clip.video_duration,
+          ...videoInfo,
+        });
+      } catch {
+        continue;
+      }
+    }
+
+    ctx.body = {
+      code: 200,
+      data: items,
+    };
+  } catch (error: any) {
+    ctx.status = 500;
+    ctx.body = {
+      code: 500,
+      message: "查询最近录制片段失败",
+      error: error?.message,
+    };
+  }
+});
+
+router.post("/danma-file", async (ctx) => {
+  const { videoFilePath } = ctx.request.body as {
+    videoFilePath?: string;
+  };
+
+  if (!videoFilePath) {
+    ctx.status = 400;
+    ctx.body = {
+      code: 400,
+      message: "videoFilePath不能为空",
+    };
+    return;
+  }
+
+  if (!(await fs.pathExists(videoFilePath))) {
+    ctx.status = 404;
+    ctx.body = {
+      code: 404,
+      message: "视频文件不存在",
+    };
+    return;
+  }
+
+  ctx.body = await createDanmaFileResponse(videoFilePath);
 });
 
 export default router;

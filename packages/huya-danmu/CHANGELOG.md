@@ -1,3 +1,24 @@
+# 0.1.5
+
+升级 socks-proxy-agent 依赖
+
+# 0.1.4
+
+初始化支持其他参数，来跳过默认的初始化查询
+
+```
+{
+  roomid: string;
+  uid?: number;
+  subChannelId?: number;
+  channelId?: number;
+}
+```
+
+# 0.1.3
+
+- 优化重试函数
+
 # 0.1.2
 
 - 为初始化请求添加重试

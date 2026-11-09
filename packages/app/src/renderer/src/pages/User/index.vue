@@ -1,50 +1,105 @@
 <template>
   <div>
-    <div class="user-info">
-      <div class="login-btns">
-        <n-button type="primary" @click="login">登录账号</n-button>
-      </div>
-    </div>
-    <div class="container">
-      <div
-        v-for="item in userList"
-        :key="item.uid"
-        class="card"
-        :class="{
-          active: item.uid === userInfo.uid,
-        }"
-      >
-        <div v-if="item.expiresText" class="expires">{{ item.expiresText }}</div>
-
-        <span class="username">{{ item.name }}</span>
-        <img :src="item.face" alt="" referrerpolicy="no-referrer" class="face" />
-        <n-popover placement="right-start" trigger="hover">
-          <template #trigger>
-            <n-icon size="25" class="pointer menu">
-              <EllipsisHorizontalOutline />
-            </n-icon>
-          </template>
-          <div style="padding: 5px 10px">uid: {{ item.uid }}</div>
-          <div v-if="item.uid !== userInfo.uid" class="section" @click="changeAccount(item.uid)">
-            使用
+    <n-tabs v-model:value="activeTab" type="segment">
+      <n-tab-pane name="bilibili" tab="B站">
+        <div class="user-info">
+          <div class="login-btns">
+            <n-button type="primary" @click="login">登录账号</n-button>
+            <n-button @click="exportAllAccounts">导出用户</n-button>
+            <n-button @click="triggerImportAll">导入用户</n-button>
+            <input
+              ref="allImportInput"
+              type="file"
+              accept="application/json"
+              style="display: none"
+              @change="onImportAllFileChange"
+            />
           </div>
-          <div class="section" @click="updateAccountInfo(item.uid)">刷新信息</div>
-          <div class="section" @click="updateAuth(item.uid)">更新授权</div>
-          <div class="section" @click="getCookie(item.uid)">复制cookie</div>
-          <div class="section" style="color: #e88080" @click="logout(item.uid)">退出账号</div>
-        </n-popover>
-      </div>
-    </div>
-    <BiliLoginDialog v-model="loginTvDialogVisible" @confirm="loginConfirm"></BiliLoginDialog>
+        </div>
+        <div class="container">
+          <div
+            v-for="item in userList"
+            :key="item.uid"
+            class="card"
+            :class="{
+              active: item.uid === userInfo.uid,
+            }"
+          >
+            <div v-if="item.expiresText" class="expires">{{ item.expiresText }}</div>
+
+            <span class="username">{{ item.name }}</span>
+            <img :src="item.face" alt="" referrerpolicy="no-referrer" class="face" />
+            <n-popover placement="right-start" trigger="hover">
+              <template #trigger>
+                <n-icon size="25" class="pointer menu">
+                  <EllipsisHorizontalOutline />
+                </n-icon>
+              </template>
+              <div style="padding: 5px 10px">uid: {{ item.uid }}</div>
+              <div
+                v-if="item.uid !== userInfo.uid"
+                class="section"
+                @click="changeAccount(item.uid)"
+              >
+                使用
+              </div>
+              <div class="section" @click="updateAccountInfo(item.uid)">刷新信息</div>
+              <div class="section" @click="updateAuth(item.uid)">更新授权</div>
+              <div class="section" @click="getCookie(item.uid)">复制cookie</div>
+              <div class="section" @click="exportCurrentAccount(item.uid)">导出</div>
+              <div class="section section-danger" @click="logout(item.uid)">退出账号</div>
+            </n-popover>
+          </div>
+        </div>
+        <BiliLoginDialog v-model="loginTvDialogVisible" @confirm="loginConfirm"></BiliLoginDialog>
+      </n-tab-pane>
+      <n-tab-pane name="douyu" tab="斗鱼">
+        <div class="user-info">
+          <div class="login-btns">
+            <n-button type="primary" @click="douyuLogin">登录账号</n-button>
+          </div>
+        </div>
+        <div class="container">
+          <div v-for="item in douyuUserList" :key="item.uid" class="card douyu-card">
+            <div class="expires" :class="{ expired: douyuRemainingDays(item.createdAt) === 0 }">
+              {{ douyuExpiryText(item.createdAt) }}
+            </div>
+            <span class="username">{{ item.name }}</span>
+            <img
+              v-if="item.avatar"
+              :src="item.avatar"
+              alt=""
+              referrerpolicy="no-referrer"
+              class="face"
+            />
+            <div v-else class="face-placeholder">{{ item.uid }}</div>
+            <n-popover placement="right-start" trigger="hover">
+              <template #trigger>
+                <n-icon size="25" class="pointer menu"><EllipsisHorizontalOutline /></n-icon>
+              </template>
+              <div style="padding: 5px 10px">uid: {{ item.uid }}</div>
+              <div class="section" @click="douyuValidate(item.uid)">校验有效性</div>
+              <div class="section" @click="douyuUpdateAuth(item.uid)">更新授权</div>
+              <div class="section section-danger" @click="douyuLogout(item.uid)">退出账号</div>
+            </n-popover>
+          </div>
+        </div>
+        <DouyuLoginDialog v-model="douyuLoginVisible" @confirm="douyuLoginConfirm" />
+      </n-tab-pane>
+    </n-tabs>
   </div>
 </template>
 
 <script setup lang="ts">
-import { userApi, taskApi } from "@renderer/apis";
+import { userApi, taskApi, douyuApi, configApi } from "@renderer/apis";
+import { verifyBiliKey } from "@renderer/utils";
 import { useClipboard } from "@vueuse/core";
+import { useRoute, useRouter } from "vue-router";
+import type { BiliUser } from "@biliLive-tools/types";
 
-import { useUserInfoStore, useAppConfig } from "@renderer/stores";
+import { useUserInfoStore, useAppConfig, useDouyuUserStore } from "@renderer/stores";
 import BiliLoginDialog from "./components/BiliLoginDialog.vue";
+import DouyuLoginDialog from "./components/DouyuLoginDialog.vue";
 import { useConfirm } from "@renderer/hooks";
 import { EllipsisHorizontalOutline } from "@vicons/ionicons5";
 
@@ -52,17 +107,144 @@ defineOptions({
   name: "User",
 });
 
+const route = useRoute();
+const router = useRouter();
+const activeTab = computed({
+  get: () => (route.query.tab === "douyu" ? "douyu" : "bilibili"),
+  set: (tab: string) => {
+    router.replace({ query: { ...route.query, tab } });
+  },
+});
+
 const { getUsers, changeUser } = useUserInfoStore();
 const { appConfig } = storeToRefs(useAppConfig());
+const { set: setAppConfig } = useAppConfig();
 const { userInfo, userList } = storeToRefs(useUserInfoStore());
 const notice = useNotification();
+const { userList: douyuUserList } = storeToRefs(useDouyuUserStore());
+const { getUsers: getDouyuUsers } = useDouyuUserStore();
+const douyuLoginVisible = ref(false);
+const DOUYU_VALID_DAYS = 60;
+const DAY_MS = 24 * 60 * 60 * 1000;
+const currentTime = ref(Date.now());
+let expiryTimer: ReturnType<typeof setInterval> | undefined;
+
+const douyuRemainingDays = (createdAt: number): number | undefined => {
+  if (!Number.isFinite(createdAt) || createdAt <= 0) return undefined;
+  return Math.max(
+    0,
+    Math.ceil((createdAt + DOUYU_VALID_DAYS * DAY_MS - currentTime.value) / DAY_MS),
+  );
+};
+
+const douyuExpiryText = (createdAt: number): string => {
+  const remaining = douyuRemainingDays(createdAt);
+  return remaining === undefined ? "有效期未知" : `剩余 ${remaining} / ${DOUYU_VALID_DAYS} 天`;
+};
+
+onMounted(() => {
+  expiryTimer = setInterval(() => {
+    currentTime.value = Date.now();
+  }, 60 * 1000);
+});
+
+onUnmounted(() => {
+  if (expiryTimer) clearInterval(expiryTimer);
+});
 
 const loginTvDialogVisible = ref(false);
 const login = async () => {
+  const [status] = await confirm.warning({
+    content: [
+      "程序请求与浏览器内正常使用所发送的请求不完全一致，能通过分析请求日志识别出来。",
+      "软件开发者不对账号发生的任何事情负责，包括并不限于被标记为机器人账号、无法参与各种抽奖和活动等。",
+      "如您知晓您的账号会因以上所列出来的部分原因所导致无法使用或权益受损等情况，并愿意承担由此所会带来的一系列后果，请继续以下的操作，软件开发者不会对您账号所发生的任何后果承担责任。",
+    ]
+      .filter(Boolean)
+      .join("\n"),
+    positiveText: "继续登录",
+    negativeText: "取消",
+  });
+  if (!status) return;
+
   loginTvDialogVisible.value = true;
 };
 
 const confirm = useConfirm();
+
+const douyuLogin = async () => {
+  const [status] = await confirm.warning({
+    title: "斗鱼登录提示",
+    content: [
+      "Cookie 会用于斗鱼录制相关请求，建议使用小号。",
+      "程序请求与浏览器正常使用的请求不完全一致，继续即表示你了解并愿意承担账号风险。",
+    ].join("\n"),
+    positiveText: "继续登录",
+    negativeText: "取消",
+  });
+  if (status) douyuLoginVisible.value = true;
+};
+
+const configureGlobalRecorderAccount = async (platform: "bilibili" | "douyu", uid: number) => {
+  const platformName = platform === "bilibili" ? "B站" : "斗鱼";
+  try {
+    const config = await configApi.get();
+    if (config.recorder[platform].uid) return;
+
+    const [status] = await confirm.warning({
+      title: `配置${platformName}全局录制账号`,
+      content: `尚未配置${platformName}全局录制账号，需要配置后才能使用登录账号录制。是否将本次登录的账号设为全局录制账号？`,
+      positiveText: "立即配置",
+      negativeText: "稍后配置",
+    });
+    if (!status) return;
+
+    const latestConfig = await configApi.get();
+    if (latestConfig.recorder[platform].uid) return;
+    await setAppConfig("recorder", {
+      ...latestConfig.recorder,
+      [platform]: { ...latestConfig.recorder[platform], uid },
+    });
+    notice.success({ title: `${platformName}全局录制账号已配置`, duration: 2000 });
+  } catch (error) {
+    notice.error({
+      title: `${platformName}全局录制账号配置失败`,
+      description: error instanceof Error ? error.message : String(error),
+    });
+  }
+};
+
+const douyuLoginConfirm = async (uid: number) => {
+  await getDouyuUsers();
+  await configureGlobalRecorderAccount("douyu", uid);
+};
+
+const douyuUpdateAuth = async (uid: number) => {
+  await douyuApi.updateAuth(uid);
+  notice.success({
+    title: "已更新授权",
+    duration: 1000,
+  });
+  await getDouyuUsers();
+};
+
+const douyuValidate = async (uid: number) => {
+  const { valid } = await douyuApi.validate(uid);
+  if (valid) {
+    notice.success({ title: "Cookie 有效", duration: 2000 });
+  } else {
+    notice.warning({ title: "Cookie 已失效", duration: 3000 });
+  }
+};
+
+const douyuLogout = async (uid: number) => {
+  const [status] = await confirm.warning({
+    content: "确认退出该斗鱼账号？",
+  });
+  if (!status) return;
+  await douyuApi.deleteUser(uid);
+  await getDouyuUsers();
+};
 
 const logout = async (uid: number) => {
   const uids = [
@@ -91,11 +273,12 @@ const changeAccount = async (uid: number) => {
   changeUser(uid);
 };
 
-const loginConfirm = async () => {
+const loginConfirm = async (uid?: number) => {
   await getUsers();
   if (!userInfo.value.uid) {
     changeAccount(userList.value[0]?.uid ?? "");
   }
+  if (uid) await configureGlobalRecorderAccount("bilibili", uid);
 };
 
 const updateAccountInfo = async (uid: number) => {
@@ -127,7 +310,151 @@ const updateAuth = async (uid: number) => {
 };
 
 const { copy } = useClipboard({ legacy: true });
+const allImportInput = ref<HTMLInputElement | null>(null);
+
+const showBiliKeyBlockedNotice = (reason: "missing" | "mismatch" | "error" | "cancelled") => {
+  if (reason === "missing") {
+    notice.error({
+      title: "未配置 BILILIVE_TOOLS_BILIKEY，当前操作已拦截",
+      duration: 1600,
+    });
+    return;
+  }
+  if (reason === "mismatch") {
+    notice.error({
+      title: "密钥错误，当前操作已拦截",
+      duration: 1600,
+    });
+    return;
+  }
+  if (reason === "error") {
+    notice.error({
+      title: "校验服务异常，当前操作已拦截",
+      duration: 1600,
+    });
+    return;
+  }
+  notice.warning({
+    title: "已取消校验，当前操作已拦截",
+    duration: 1200,
+  });
+};
+
+const downloadJSON = async (name: string, data: unknown): Promise<boolean> => {
+  const blob = new Blob([JSON.stringify(data, null, 2)], {
+    type: "application/json;charset=utf-8",
+  });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = name;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(url);
+  return true;
+};
+
+const readJSONFile = async <T,>(file: File): Promise<T> => {
+  const text = await file.text();
+  return JSON.parse(text) as T;
+};
+
+const isBiliUser = (value: unknown): value is BiliUser => {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+
+  const user = value as {
+    mid?: unknown;
+    accessToken?: unknown;
+    refreshToken?: unknown;
+    cookie?: unknown;
+  };
+
+  return (
+    typeof user.mid === "number" &&
+    typeof user.accessToken === "string" &&
+    typeof user.refreshToken === "string" &&
+    !!user.cookie &&
+    typeof user.cookie === "object"
+  );
+};
+
+const exportCurrentAccount = async (uid: number) => {
+  const isVerified = await verifyBiliKey({
+    onBlocked: showBiliKeyBlockedNotice,
+  });
+  if (!isVerified) return;
+
+  const user = await userApi.exportSingle(uid);
+  const isExported = await downloadJSON(`bili-user-${uid}.json`, user);
+  if (!isExported) return;
+  notice.success({
+    title: "导出成功",
+    duration: 1200,
+  });
+};
+
+const exportAllAccounts = async () => {
+  const isVerified = await verifyBiliKey({
+    onBlocked: showBiliKeyBlockedNotice,
+  });
+  if (!isVerified) return;
+
+  const users = await userApi.exportAll();
+  const isExported = await downloadJSON("bili-users-all.json", users);
+  if (!isExported) return;
+  notice.success({
+    title: "导出成功",
+    duration: 1200,
+  });
+};
+
+const triggerImportAll = () => {
+  allImportInput.value?.click();
+};
+
+const onImportAllFileChange = async (event: Event) => {
+  const input = event.target as HTMLInputElement;
+  const file = input.files?.[0];
+  if (!file) return;
+
+  try {
+    const payload = await readJSONFile<unknown>(file);
+
+    if (Array.isArray(payload)) {
+      if (!payload.every(isBiliUser)) {
+        throw new Error("invalid user list payload");
+      }
+      await userApi.importAll(payload);
+    } else if (isBiliUser(payload)) {
+      await userApi.importSingle(payload);
+    } else {
+      throw new Error("invalid user payload");
+    }
+
+    await getUsers();
+    notice.success({
+      title: "导入成功",
+      duration: 1200,
+    });
+  } catch {
+    notice.error({
+      title: "导入失败，文件格式错误",
+      duration: 1600,
+    });
+  } finally {
+    input.value = "";
+  }
+};
+
 const getCookie = async (uid: number) => {
+  const isVerified = await verifyBiliKey({
+    onBlocked: showBiliKeyBlockedNotice,
+  });
+  if (!isVerified) return;
+
   const cookie = await userApi.getCookie(uid);
   await copy(cookie);
 
@@ -138,7 +465,9 @@ const getCookie = async (uid: number) => {
 };
 
 onActivated(() => {
+  currentTime.value = Date.now();
   getUsers();
+  getDouyuUsers();
 });
 </script>
 
@@ -157,16 +486,13 @@ onActivated(() => {
     padding: 10px;
     width: 100px;
     border-radius: 10px;
-    background-color: #fff;
+    background-color: var(--bg-card);
     justify-content: center;
     align-items: center;
-    border: 1px solid #eee;
+    border: 1px solid var(--border-primary);
     position: relative;
     display: flex;
     flex-direction: column;
-    @media screen and (prefers-color-scheme: dark) {
-      border: none;
-    }
     .face {
       width: 80%;
     }
@@ -174,10 +500,7 @@ onActivated(() => {
       position: absolute;
       bottom: 0px;
       right: 5px;
-
-      @media screen and (prefers-color-scheme: dark) {
-        color: rgb(51, 54, 57);
-      }
+      color: var(--text-secondary);
     }
   }
   .card.active {
@@ -189,8 +512,8 @@ onActivated(() => {
       left: 0;
       width: 100%;
       height: 100%;
-      color: #fff;
-      background-color: rgba(0, 0, 0, 0.5);
+      color: #ffffff;
+      background-color: var(--bg-modal);
       display: flex;
       justify-content: center;
       align-items: center;
@@ -206,10 +529,11 @@ onActivated(() => {
   padding: 5px 10px;
   cursor: pointer;
   &:hover {
-    background-color: #eee;
-    @media screen and (prefers-color-scheme: dark) {
-      background-color: rgba(255, 255, 255, 0.09);
-    }
+    background-color: var(--bg-hover);
+  }
+
+  &.section-danger {
+    color: var(--color-danger-text);
   }
 }
 .expires {
@@ -217,13 +541,25 @@ onActivated(() => {
   position: absolute;
   bottom: 0;
   left: 0;
-  background: rgb(124, 189, 125);
-  color: white;
+  background: var(--color-success);
+  color: var(--text-inverse);
   padding: 4px 6px;
   border-radius: 0 10px 0 10px;
   font-size: 10px;
+  &.expired {
+    background: var(--color-danger-text);
+  }
 }
 .username {
-  color: black;
+  color: var(--text-primary);
+}
+.face-placeholder {
+  width: 80%;
+  aspect-ratio: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-secondary);
+  background: var(--bg-hover);
 }
 </style>

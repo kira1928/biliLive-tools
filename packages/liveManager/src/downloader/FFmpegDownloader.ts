@@ -1,0 +1,244 @@
+import EventEmitter from "node:events";
+
+import { createFFMPEGBuilder, StreamManager, utils } from "../index.js";
+import { createFFmpegInvalidStreamChecker, assert } from "../utils.js";
+import { IDownloader, FFMPEGRecorderOptions, Segment } from "./IDownloader.js";
+
+import { FormatName, DEFAULT_USER_AGENT } from "./index.js";
+import type { VideoFormat } from "../index.js";
+
+export class FFmpegDownloader extends EventEmitter implements IDownloader {
+  public type = "ffmpeg" as const;
+  private command: ReturnType<typeof createFFMPEGBuilder>;
+  private streamManager: StreamManager;
+  private timeoutChecker: ReturnType<typeof utils.createTimeoutChecker>;
+  readonly hasSegment: boolean;
+  readonly getSavePath: (data: { startTime: number; title?: string }) => string;
+  readonly segment: Segment;
+  ffmpegOutputOptions: string[] = [];
+  readonly inputOptions: string[] = [];
+  readonly isHls: boolean;
+  readonly disableDanma: boolean = false;
+  readonly url: string;
+  formatName: FormatName;
+  videoFormat: VideoFormat;
+  readonly debugLevel: "none" | "basic" | "verbose" = "none";
+  readonly proxy?: string;
+  readonly headers:
+    | {
+        [key: string]: string | undefined;
+      }
+    | undefined;
+
+  constructor(
+    opts: FFMPEGRecorderOptions,
+    private onEnd: (...args: unknown[]) => void,
+    private onUpdateLiveInfo: () => Promise<{ title?: string; cover?: string }>,
+  ) {
+    super();
+    let hasSegment = false;
+    // 只有数字才表示时间分段，只有时间分段才会在ffmpeg走分段逻辑
+    if (opts.segment && typeof opts.segment === "number") {
+      hasSegment = true;
+    }
+    this.hasSegment = hasSegment;
+    this.debugLevel = opts.debugLevel ?? "none";
+    this.formatName = opts.formatName;
+
+    if (this.formatName === "fmp4" || this.formatName === "ts") {
+      this.isHls = true;
+    } else {
+      this.isHls = false;
+    }
+
+    let videoFormat = opts.videoFormat ?? "auto";
+    if (videoFormat === "auto") {
+      if (!this.hasSegment) {
+        videoFormat = "m4s";
+        if (this.formatName === "ts") {
+          videoFormat = "ts";
+        }
+      } else {
+        videoFormat = "ts";
+      }
+    }
+    this.videoFormat = videoFormat;
+
+    this.disableDanma = opts.disableDanma ?? false;
+    this.streamManager = new StreamManager(
+      opts.getSavePath,
+      this.hasSegment,
+      this.disableDanma,
+      "ffmpeg",
+      this.videoFormat,
+      {
+        onUpdateLiveInfo: this.onUpdateLiveInfo,
+      },
+    );
+    this.timeoutChecker = utils.createTimeoutChecker(
+      () => this.onEnd("ffmpeg timeout"),
+      3 * 10e3,
+      false,
+    );
+    this.getSavePath = opts.getSavePath;
+    this.ffmpegOutputOptions = opts.outputOptions;
+    this.inputOptions = opts.inputOptions ?? [];
+    this.url = opts.url;
+    this.segment = opts.segment;
+    this.headers = opts.headers;
+    this.proxy = opts.proxy;
+
+    this.command = this.createCommand();
+    this.streamManager.on("videoFileCreated", ({ filename, cover, rawFilename, title }) => {
+      this.emit("videoFileCreated", { filename, cover, rawFilename, title });
+    });
+    this.streamManager.on("videoFileCompleted", (data) => {
+      this.emit("videoFileCompleted", data);
+    });
+    this.streamManager.on("DebugLog", (data) => {
+      this.emit("DebugLog", data);
+    });
+  }
+
+  createCommand() {
+    this.timeoutChecker?.start();
+    const invalidCount = this.isHls ? 35 : 18;
+    const isInvalidStream = createFFmpegInvalidStreamChecker(invalidCount);
+    const inputOptions = [
+      ...this.inputOptions,
+      "-user_agent",
+      this.headers?.["User-Agent"] ?? DEFAULT_USER_AGENT,
+    ];
+    if (this.isHls) {
+      inputOptions.push(
+        ...["-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "3"],
+      );
+    }
+    if (this.proxy) {
+      inputOptions.push(...["-http_proxy", this.proxy]);
+    }
+    if (this.debugLevel === "verbose") {
+      inputOptions.push("-loglevel", "debug");
+    }
+    if (this.headers) {
+      const headers: string[] = [];
+      Object.entries(this.headers).forEach(([key, value]) => {
+        if (!value || key === "User-Agent") return; // User-Agent单独处理
+        headers.push(`${key}:${value}`);
+      });
+      if (headers.length) {
+        inputOptions.push("-headers", headers.join("\\r\\n"));
+      }
+    }
+
+    const outputOptions = this.buildOutputOptions();
+    const command = createFFMPEGBuilder()
+      .input(this.url)
+      .inputOptions(inputOptions)
+      .outputOptions(outputOptions)
+      .output(this.streamManager.videoFilePath)
+      .on("error", this.onEnd)
+      .on("end", () => this.onEnd("finished"))
+      .on("stderr", async (stderrLine) => {
+        assert(typeof stderrLine === "string");
+        this.emit("DebugLog", { type: "ffmpeg", text: stderrLine });
+
+        const [isInvalid, reason] = isInvalidStream(stderrLine);
+        if (isInvalid) {
+          this.onEnd(reason);
+        }
+
+        await this.streamManager.handleVideoStarted(stderrLine);
+        const info = this.formatLine(stderrLine);
+        if (info) {
+          this.emit("progress", info);
+        }
+      })
+      .on("stderr", this.timeoutChecker?.update);
+    return command;
+  }
+  buildOutputOptions() {
+    const options: string[] = [];
+    options.push(...this.ffmpegOutputOptions);
+    options.push(
+      "-c",
+      "copy",
+      "-movflags",
+      "+frag_keyframe+empty_moov+separate_moof",
+      "-fflags",
+      "+genpts+igndts",
+      "-min_frag_duration",
+      "10000000",
+    );
+    if (this.segment) {
+      if (typeof this.segment === "number") {
+        options.push("-f", "segment", "-segment_time", String(this.segment * 60));
+      } else if (typeof this.segment === "string") {
+        options.push("-fs", String(this.segment));
+      }
+      options.push("-reset_timestamps", "1");
+      if (this.videoFormat === "m4s") {
+        options.push("-segment_format", "mp4");
+      }
+    } else {
+      if (this.videoFormat === "m4s") {
+        options.push("-f", "mp4");
+      }
+    }
+
+    return options;
+  }
+
+  formatLine(line: string) {
+    if (!line.includes("time=")) {
+      return null;
+    }
+    let time: string | null = null;
+
+    const timeMatch = line.match(/time=([0-9:.]+)/);
+    if (timeMatch) {
+      time = timeMatch[1].split(".")[0];
+    }
+
+    return {
+      time,
+    };
+  }
+
+  public run() {
+    this.command.run();
+  }
+
+  public getArguments() {
+    return this.command._getArguments();
+  }
+
+  public async stop() {
+    this.timeoutChecker.stop();
+    try {
+      // ts文件使用write("q")需要十来秒进行处理，直接中断，其他格式使用sigint会导致缺少数据
+      if (this.streamManager.videoFilePath.endsWith(".ts")) {
+        this.command.kill("SIGINT");
+      } else {
+        // @ts-ignore
+        this.command.ffmpegProc?.stdin?.write("q");
+      }
+
+      await this.streamManager.handleVideoCompleted();
+    } catch (err) {
+      this.emit("DebugLog", { type: "error", text: String(err) });
+    }
+  }
+
+  public getExtraDataController() {
+    return this.streamManager?.getExtraDataController();
+  }
+
+  public get videoFilePath() {
+    return this.streamManager.videoFilePath;
+  }
+
+  public cut() {
+    throw new Error("FFmpeg downloader does not support cut operation.");
+  }
+}

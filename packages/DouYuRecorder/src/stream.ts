@@ -1,17 +1,19 @@
-import { live } from "douyu-api";
-
 import { DouyuQualities, Recorder, utils } from "@bililive-tools/manager";
-import { getLiveInfo } from "./dy_api.js";
-import { requester } from "./requester.js";
+import { DouyuParser } from "@bililive-tools/stream-get";
 
-export async function getInfo(channelId: string): Promise<{
+export async function getInfo(
+  channelId: string,
+  auth?: string,
+): Promise<{
   living: boolean;
   owner: string;
   title: string;
-  startTime: Date;
+  liveStartTime: Date;
   avatar: string;
   cover: string;
   liveId: string;
+  recordStartTime: Date;
+  area: string;
   // gifts: {
   //   id: string;
   //   name: string;
@@ -19,71 +21,27 @@ export async function getInfo(channelId: string): Promise<{
   //   cost: number;
   // }[];
 }> {
-  const res = await requester.get<
-    | {
-        error: number;
-        data: {
-          room_status: string;
-          owner_name: string;
-          avatar: string;
-          room_name: string;
-          start_time: string;
-          gift: {
-            id: string;
-            name: string;
-            himg: string;
-            pc: number;
-          }[];
-        };
-      }
-    | string
-  >(`http://open.douyucdn.cn/api/RoomApi/room/${channelId}`);
+  const parser = new DouyuParser({ cookie: auth });
+  const data = await parser.getRoomInfo(channelId);
 
-  if (res.status !== 200) {
-    if (res.status === 404 && res.data === "Not Found") {
-      throw new Error("错误的地址 " + channelId);
-    }
-
-    throw new Error(`Unexpected status code, ${res.status}, ${res.data}`);
-  }
-
-  if (typeof res.data !== "object")
-    throw new Error(`Unexpected response, ${res.status}, ${res.data}`);
-
-  const json = res.data;
-  if (json.error === 101) throw new Error("错误的地址 " + channelId);
-  if (json.error !== 0) throw new Error("Unexpected error code, " + json.error);
-  let living = json.data.room_status === "1";
-
-  const data = await live.getRoomInfo(Number(channelId));
-  if (living) {
-    const isVideoLoop = data.room.videoLoop === 1;
-    if (isVideoLoop) {
-      living = false;
-    }
-  }
-
-  const startTime = new Date(data.room.show_time * 1000);
+  const startTime = data.liveStartTime || new Date();
+  const recordStartTime = new Date();
   return {
-    living,
-    owner: data.room.nickname,
-    title: data.room.room_name,
-    avatar: data.room.avatar.big,
-    cover: data.room.room_pic,
-    startTime: startTime,
+    living: data.living,
+    owner: data.owner,
+    title: data.title,
+    avatar: data.avatar,
+    cover: data.cover,
+    liveStartTime: startTime,
     liveId: utils.md5(`${channelId}-${startTime?.getTime() ?? Date.now()}`),
-
-    // gifts: data.gift.map((g) => ({
-    //   id: g.id,
-    //   name: g.name,
-    //   img: g.himg,
-    //   cost: g.pc,
-    // })),
+    recordStartTime: recordStartTime,
+    area: data.area || "",
   };
 }
 
 export async function getStream(
-  opts: Pick<Recorder, "channelId" | "quality"> & {
+  opts: Pick<Recorder, "channelId" | "quality" | "api" | "codecName"> & {
+    auth?: string;
     rejectCache?: boolean;
     strictQuality?: boolean;
     source?: string;
@@ -97,18 +55,33 @@ export async function getStream(
 
   let cdn = opts.source === "auto" ? undefined : opts.source;
   if (opts.source === "auto" && opts.avoidEdgeCDN) {
-    // TODO: 如果不存在 cdn=hw-h5 的源，那么还是可能默认到边缘节点，就先这样吧
     cdn = "hw-h5";
   }
-  let liveInfo = await getLiveInfo({
-    channelId: opts.channelId,
+  const parser = new DouyuParser({ cookie: opts.auth });
+  const shouldHevc = opts.codecName === "hevc";
+  const isOldApi = opts.api === "old";
+  let liveInfo = await parser.getLiveInfo(opts.channelId, {
     rate: qn,
     cdn,
     onlyAudio: opts.onlyAudio,
+    hevc: shouldHevc,
+    oldApi: isOldApi,
   });
   if (!liveInfo.living) throw new Error("It must be called getStream when living");
 
-  // console.log(JSON.stringify(liveInfo, null, 2));
+  //如果是scdn，那么找到第一个非scdn的源，重新请求一次
+  if (liveInfo.currentStream.source === "scdn") {
+    const nonScdnSource = liveInfo.sources.find((source) => source.cdn !== "scdnctshh");
+    if (nonScdnSource) {
+      liveInfo = await parser.getLiveInfo(opts.channelId, {
+        rate: qn,
+        cdn: nonScdnSource?.cdn,
+        onlyAudio: opts.onlyAudio,
+        hevc: shouldHevc,
+      });
+    }
+  }
+  if (!liveInfo.living) throw new Error("It must be called getStream when living");
 
   if (liveInfo.currentStream.rate !== qn && opts.strictQuality) {
     throw new Error("Can not get expect quality because of strictQuality");
@@ -120,23 +93,18 @@ export async function getStream(
   }
 
   // 是否存在画质下没有source的情况，可能需要切换画质
-  if (liveInfo.currentStream.rate !== qn) {
-    if (liveInfo.streams.length === 0) {
-      throw new Error("Can not get expect quality because of no available stream");
-    } else {
-      liveInfo = await getLiveInfo({
-        channelId: opts.channelId,
-        rate: liveInfo.streams[0].rate,
-        onlyAudio: opts.onlyAudio,
-      });
-      if (!liveInfo.living) throw new Error("It must be called getStream when living");
-    }
-  }
-
-  // 流未准备好，防止刚开播时的无效录制。
-  // 该判断可能导致开播前 30 秒左右无法录制到，因为 streamStatus 在后端似乎有缓存，所以暂时不使用。
-  // TODO: 需要在 ffmpeg 那里加处理，防止无效录制
-  // if (!json.data.streamStatus) return
+  // if (liveInfo.currentStream.rate !== qn) {
+  //   if (liveInfo.streams.length === 0) {
+  //     throw new Error("Can not get expect quality because of no available stream");
+  //   } else {
+  //     liveInfo = await parser.getLiveInfo(opts.channelId, {
+  //       rate: liveInfo.streams[0].rate,
+  //       onlyAudio: opts.onlyAudio,
+  //       hevc: shouldHevc,
+  //     });
+  //     if (!liveInfo.living) throw new Error("It must be called getStream when living");
+  //   }
+  // }
 
   return liveInfo;
 }

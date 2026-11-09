@@ -4,36 +4,49 @@ import logger from "../../utils/log.js";
 
 import type { Database } from "better-sqlite3";
 
-const BaseLive = z.object({
+const BaseLiveHistory = z.object({
   streamer_id: z.number(),
   live_start_time: z.number().optional(),
   record_start_time: z.number(),
   title: z.string(),
   record_end_time: z.number().optional(),
   video_file: z.string().optional(),
+  // 视频文件名，不含后缀
+  video_filename: z.string().optional(),
   // 视频持续时长，支持为空，浮点数
   video_duration: z.number().optional(),
   // 弹幕数量
   danma_num: z.number().optional(),
   // 互动人数
   interact_num: z.number().optional(),
+  // 弹幕统计 JSON，
+  // {danmaTimeline: {
+  //   interval: 5,
+  //   data: [2, 1],
+  // }}
+  danma_stats_json: z.string().optional(),
   // 直播id
   live_id: z.string().optional(),
+  // 文件快速哈希值
+  quick_hash: z.string().optional(),
 });
 
-const Live = BaseLive.extend({
+const LiveHistory = BaseLiveHistory.extend({
   id: z.number(),
   created_at: z.number().optional(),
 });
 
-export type BaseLive = z.infer<typeof BaseLive>;
-export type Live = z.infer<typeof Live>;
+export type BaseLiveHistory = z.infer<typeof BaseLiveHistory>;
+export type LiveHistory = z.infer<typeof LiveHistory>;
 
-class LiveModel extends BaseModel<Live> {
+export default class RecordHistoryModel extends BaseModel<LiveHistory> {
   table = "record_history";
 
-  constructor(db: Database) {
+  constructor({ db }: { db: Database }) {
     super(db, "record_history");
+    this.createTable();
+    this.migrate();
+    this.createIndexes();
   }
 
   async createTable() {
@@ -44,13 +57,16 @@ class LiveModel extends BaseModel<Live> {
         streamer_id INTEGER NOT NULL,                        -- 主播id
         live_id TEXT,                                       -- 直播id
         live_start_time INTEGER NOT NULL,                    -- 直播开始时间，秒时间戳
-        record_start_time INTEGER NOT NULL,                  -- 录制开始时间，秒时间戳
-        record_end_time INTEGER,                             -- 录制结束时间，秒时间戳
+        record_start_time INTEGER NOT NULL,                  -- 视频录制开始时间，毫秒时间戳
+        record_end_time INTEGER,                             -- 视频录制结束时间，毫秒时间戳
         title TEXT,                                          -- 直播标题
         video_file TEXT,                                     -- 视频文件路径
+        video_filename TEXT,                                 -- 视频文件名，不含后缀
         video_duration REAL,                                 -- 视频持续时长，浮点数，秒
         danma_num INTEGER,                                   -- 弹幕数量
-        interact_num INTEGER,                                 -- 互动人数
+        interact_num INTEGER,                                -- 互动人数
+        danma_stats_json TEXT,                               -- 弹幕统计JSON
+        quick_hash TEXT,                                     -- 文件快速哈希值
         FOREIGN KEY (streamer_id) REFERENCES streamer(id)    -- 外键约束
       ) STRICT;
     `;
@@ -94,6 +110,14 @@ class LiveModel extends BaseModel<Live> {
           name: "idx_record_history_live_video",
           sql: `CREATE INDEX IF NOT EXISTS idx_record_history_live_video ON record_history(live_id, video_file)`,
         },
+        {
+          name: "idx_record_history_record_start_time",
+          sql: `CREATE INDEX IF NOT EXISTS idx_record_history_record_start_time ON record_history(record_start_time)`,
+        },
+        {
+          name: "idx_record_history_filename_duration",
+          sql: `CREATE INDEX IF NOT EXISTS idx_record_history_filename_duration ON record_history(video_filename, video_duration)`,
+        },
       ];
 
       for (const index of indexes) {
@@ -118,7 +142,13 @@ class LiveModel extends BaseModel<Live> {
       // @ts-ignore
       const hasInteractNumColumn = columns.some((col) => col.name === "interact_num");
       // @ts-ignore
+      const hasDanmaStatsJsonColumn = columns.some((col) => col.name === "danma_stats_json");
+      // @ts-ignore
       const hasLiveIdColumn = columns.some((col) => col.name === "live_id");
+      // @ts-ignore
+      const hasQuickHashColumn = columns.some((col) => col.name === "quick_hash");
+      // @ts-ignore
+      const hasVideoFilenameColumn = columns.some((col) => col.name === "video_filename");
 
       if (!hasVideoDurationColumn) {
         // 添加video_duration列
@@ -138,10 +168,28 @@ class LiveModel extends BaseModel<Live> {
         logger.info(`已为${this.tableName}表添加interactNum列`);
       }
 
+      if (!hasDanmaStatsJsonColumn) {
+        // 添加danma_stats_json列
+        this.db.prepare(`ALTER TABLE ${this.tableName} ADD COLUMN danma_stats_json TEXT`).run();
+        logger.info(`已为${this.tableName}表添加danma_stats_json列`);
+      }
+
       if (!hasLiveIdColumn) {
         // 添加live_id列
         this.db.prepare(`ALTER TABLE ${this.tableName} ADD COLUMN live_id TEXT`).run();
         logger.info(`已为${this.tableName}表添加live_id列`);
+      }
+
+      if (!hasQuickHashColumn) {
+        // 添加quick_hash列
+        this.db.prepare(`ALTER TABLE ${this.tableName} ADD COLUMN quick_hash TEXT`).run();
+        logger.info(`已为${this.tableName}表添加quick_hash列`);
+      }
+
+      if (!hasVideoFilenameColumn) {
+        // 添加video_filename列
+        this.db.prepare(`ALTER TABLE ${this.tableName} ADD COLUMN video_filename TEXT`).run();
+        logger.info(`已为${this.tableName}表添加video_filename列`);
       }
 
       return true;
@@ -150,45 +198,80 @@ class LiveModel extends BaseModel<Live> {
       return false;
     }
   }
-}
 
-export default class LiveController {
-  private model!: LiveModel;
-  init(db: Database) {
-    this.model = new LiveModel(db);
-    this.model.createTable();
-    this.model.migrate();
-    this.model.createIndexes();
+  add(options: BaseLiveHistory) {
+    const data = BaseLiveHistory.parse(options);
+    return this.insert(data);
   }
 
-  add(options: BaseLive) {
-    const data = BaseLive.parse(options);
-    return this.model.insert(data);
-  }
-  addMany(list: BaseLive[]) {
-    const filterList = list.map((item) => BaseLive.parse(item));
-
-    return this.model.insertMany(filterList);
-  }
-  list(options: Partial<Live>): Live[] {
-    const data = Live.partial().parse(options);
-    return this.model.list(data);
+  addMany(list: BaseLiveHistory[]) {
+    const filterList = list.map((item) => BaseLiveHistory.parse(item));
+    return this.insertMany(filterList);
   }
 
   /**
-   * 分页查询记录历史，支持时间范围过滤和排序
+   * 批量获取多个频道的最后录制时间
+   * @param streamers 主播ID列表
+   * @returns 最后录制时间映射表
+   */
+  getLastRecordTimes(streamerIds: number[]): Map<number, number | null> {
+    if (streamerIds.length === 0) {
+      return new Map();
+    }
+
+    const placeholders = streamerIds.map(() => "?").join(",");
+    const sql = `
+      SELECT streamer_id, MAX(record_start_time) as last_record_time
+      FROM ${this.tableName}
+      WHERE streamer_id IN (${placeholders})
+        AND record_start_time IS NOT NULL
+      GROUP BY streamer_id
+    `;
+
+    const stmt = this.db.prepare(sql);
+    const results = stmt.all(...streamerIds) as Array<{
+      streamer_id: number;
+      last_record_time: number | null;
+    }>;
+
+    const resultMap = new Map<number, number | null>();
+    // 初始化所有ID为null
+    streamerIds.forEach((id) => resultMap.set(id, null));
+    // 填充查询结果
+    results.forEach((row) => {
+      if (row.last_record_time) {
+        resultMap.set(row.streamer_id, row.last_record_time);
+      }
+    });
+
+    return resultMap;
+  }
+
+  getRecordStartTimes(streamerId: number, startTime: number, endTime: number): number[] {
+    const rows = this.db
+      .prepare(
+        `SELECT record_start_time FROM ${this.tableName}
+         WHERE streamer_id = ? AND record_start_time >= ? AND record_start_time < ?
+         ORDER BY record_start_time`,
+      )
+      .all(streamerId, startTime, endTime) as Array<{ record_start_time: number }>;
+    return rows.map((row) => row.record_start_time);
+  }
+
+  /**
+   * 分页查询记录历史,支持时间范围过滤和排序
    * @param options 查询参数
    * @returns 分页结果
    */
-  paginate(options: {
-    where: Partial<Live>;
+  paginateWithTimeRange(options: {
+    where: Partial<LiveHistory>;
     page?: number;
     pageSize?: number;
     startTime?: number;
     endTime?: number;
     orderBy?: string;
     orderDirection?: "ASC" | "DESC";
-  }): { data: Live[]; total: number } {
+  }): { data: LiveHistory[]; total: number } {
     const {
       where,
       page = 1,
@@ -212,6 +295,10 @@ export default class LiveController {
       whereConditions.push("video_file = ?");
       params.push(where.video_file);
     }
+    if (where.live_id) {
+      whereConditions.push("live_id = ?");
+      params.push(where.live_id);
+    }
 
     // 处理时间范围过滤
     if (startTime) {
@@ -226,55 +313,71 @@ export default class LiveController {
     const whereClause = whereConditions.length > 0 ? `WHERE ${whereConditions.join(" AND ")}` : "";
 
     // 获取总记录数
-    const countSql = `SELECT COUNT(*) as total FROM ${this.model.tableName} ${whereClause}`;
-    const countStmt = this.model.db.prepare(countSql);
+    const countSql = `SELECT COUNT(*) as total FROM ${this.tableName} ${whereClause}`;
+    const countStmt = this.db.prepare(countSql);
     const countResult = countStmt.get(...params) as { total: number };
     const total = countResult.total;
 
     // 获取分页数据
     const offset = (page - 1) * pageSize;
     const dataSql = `
-      SELECT * FROM ${this.model.tableName} 
+      SELECT * FROM ${this.tableName} 
       ${whereClause} 
       ORDER BY ${orderBy} ${orderDirection} 
       LIMIT ? OFFSET ?
     `;
-    const dataStmt = this.model.db.prepare(dataSql);
-    const data = dataStmt.all(...params, pageSize, offset) as Live[];
+    const dataStmt = this.db.prepare(dataSql);
+    const data = dataStmt.all(...params, pageSize, offset) as LiveHistory[];
 
     return { data, total };
   }
 
-  query(options: Partial<Live>) {
-    const data = Live.partial().parse(options);
-    return this.model.query(data);
-  }
-  // upsert(options: { where: Partial<Live & { id: number }>; create: BaseLive }) {
-  //   return this.model.upsert(options);
-  // }
-  update(options: Partial<Live & { id: number }>) {
-    const data = Live.partial()
-      .required({
-        id: true,
-      })
-      .parse(options);
-    return this.model.update(data);
-  }
   /**
-   * 删除单个录制历史记录
-   * @param id 记录ID
-   * @returns 删除的记录数量
+   * 查询总视频时长
+   * @param options 查询参数
+   * @returns 总时长（秒）
    */
-  removeRecord(id: number): number {
-    return this.model.deleteBy("id", id);
-  }
+  getTotalDuration(options?: {
+    streamerId?: number;
+    startTime?: number;
+    endTime?: number;
+  }): number {
+    const { streamerId, startTime, endTime } = options || {};
 
-  /**
-   * 批量删除录制历史记录
-   * @param streamerId 主播ID
-   * @returns 删除的记录数量
-   */
-  removeRecordsByStreamerId(streamerId: number): number {
-    return this.model.deleteBy("streamer_id", streamerId);
+    // 构建WHERE条件
+    const whereConditions: string[] = [];
+    const params: any[] = [];
+
+    // 过滤掉 video_duration 为 null 或 0 的记录
+    whereConditions.push("video_duration IS NOT NULL");
+    whereConditions.push("video_duration > 0");
+
+    if (streamerId) {
+      whereConditions.push("streamer_id = ?");
+      params.push(streamerId);
+    }
+
+    if (startTime) {
+      whereConditions.push("record_start_time >= ?");
+      params.push(startTime);
+    }
+
+    if (endTime) {
+      whereConditions.push("record_start_time <= ?");
+      params.push(endTime);
+    }
+
+    const whereClause = `WHERE ${whereConditions.join(" AND ")}`;
+
+    const sql = `
+      SELECT COALESCE(SUM(video_duration), 0) as total_duration
+      FROM ${this.tableName}
+      ${whereClause}
+    `;
+
+    const stmt = this.db.prepare(sql);
+    const result = stmt.get(...params) as { total_duration: number };
+
+    return result.total_duration || 0;
   }
 }

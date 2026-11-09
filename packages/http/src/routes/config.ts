@@ -8,16 +8,22 @@ import { appConfig, container } from "../index.js";
 import multer from "../middleware/multer.js";
 import { _send } from "@biliLive-tools/shared/notify.js";
 import { getTempPath } from "@biliLive-tools/shared/utils/index.js";
-import db, { reconnectDB } from "@biliLive-tools/shared/db/index.js";
-
-import type { GlobalConfig } from "@biliLive-tools/types";
-import type { VideoPreset } from "@biliLive-tools/shared";
+import { reconnectDB, backupDB, closeDB } from "@biliLive-tools/shared/db/index.js";
 
 const router = new Router({
   prefix: "/config",
 });
 
 const upload = multer({ dest: os.tmpdir() });
+
+type VerifyBiliKeyReason = "missing" | "mismatch" | "error" | "ok";
+
+interface VerifyBiliKeyResponse {
+  configured: boolean;
+  valid: boolean;
+  matched: boolean;
+  reason: VerifyBiliKeyReason;
+}
 
 router.get("/", async (ctx) => {
   const config = appConfig.getAll();
@@ -31,6 +37,16 @@ router.post("/", async (ctx) => {
   ctx.body = "success";
 });
 
+router.get("/get", async (ctx) => {
+  const key = ctx.query.key as string;
+  if (!key) {
+    ctx.body = "key is required";
+    return;
+  }
+  const value = appConfig.get(key);
+  ctx.body = value;
+});
+
 router.post("/set", async (ctx) => {
   const data = ctx.request.body;
   if (!data.key || !data.value) {
@@ -42,7 +58,52 @@ router.post("/set", async (ctx) => {
   ctx.body = "success";
 });
 
-router.post("/resetBin", async (ctx) => {
+router.post("/verifyBiliKey", async (ctx) => {
+  try {
+    const serverKey = process.env.BILILIVE_TOOLS_BILIKEY;
+    const configured = typeof serverKey === "string" && serverKey.trim().length > 0;
+
+    const requestBody = ctx.request.body as { key?: unknown };
+    const rawInput = typeof requestBody?.key === "string" ? requestBody.key : "";
+    const inputKey = rawInput.trim();
+
+    let response: VerifyBiliKeyResponse;
+    if (!configured) {
+      response = {
+        configured: false,
+        valid: false,
+        matched: false,
+        reason: "missing",
+      };
+    } else if (inputKey === serverKey) {
+      response = {
+        configured: true,
+        valid: true,
+        matched: true,
+        reason: "ok",
+      };
+    } else {
+      response = {
+        configured: true,
+        valid: false,
+        matched: false,
+        reason: "mismatch",
+      };
+    }
+
+    ctx.body = response;
+  } catch {
+    const response: VerifyBiliKeyResponse = {
+      configured: false,
+      valid: false,
+      matched: false,
+      reason: "error",
+    };
+    ctx.body = response;
+  }
+});
+
+router.post("/reset-bin", async (ctx) => {
   const data = ctx.request.body;
   const type = data.type;
   if (!type) {
@@ -50,7 +111,7 @@ router.post("/resetBin", async (ctx) => {
     return;
   }
 
-  const globalConfig = container.resolve<GlobalConfig>("globalConfig");
+  const globalConfig = container.resolve("globalConfig");
 
   if (type === "ffmpeg") {
     ctx.body = globalConfig.defaultFfmpegPath;
@@ -111,23 +172,23 @@ async function exportConfig(opts: {
 
 router.get("/export", async (ctx) => {
   try {
-    const globalConfig = container.resolve<GlobalConfig>("globalConfig");
+    const globalConfig = container.resolve("globalConfig");
     const { configPath, videoPresetPath, danmuPresetPath, ffmpegPresetPath, userDataPath } =
       globalConfig;
     const coverPath = path.join(userDataPath, "cover");
 
-    const preset = container.resolve<VideoPreset>("videoPreset");
+    const preset = container.resolve("videoPreset");
     const videoPresets = await preset.list();
     const usedImages = videoPresets
       .map((item) => item.config.cover)
       .filter((cover) => cover && !path.isAbsolute(cover));
 
-    const usedImageSet = new Set(usedImages);
+    const usedImageSet: Set<string | undefined> = new Set(usedImages);
     const tempDir = getTempPath();
     const backupPath = path.join(tempDir, "biliLive-tools");
     await fs.ensureDir(backupPath);
     const dbPath = path.join(backupPath, "app.db");
-    await db.backup(dbPath);
+    await backupDB(dbPath);
 
     const buffer = await exportConfig({
       configPath,
@@ -154,7 +215,7 @@ router.post("/import", upload.single("file"), async (ctx) => {
     return;
   }
 
-  const globalConfig = container.resolve<GlobalConfig>("globalConfig");
+  const globalConfig = container.resolve("globalConfig");
   const { configPath, userDataPath } = globalConfig;
 
   await fs.ensureDir(path.join(userDataPath, "cover"));
@@ -181,26 +242,28 @@ router.post("/import", upload.single("file"), async (ctx) => {
           // 如果filename是 appConfig.json，那么替换掉ffmpegPath、ffprobePath、danmuFactoryPath配置
           if (filename === "appConfig.json") {
             const data = await fs.readJSON(path.join(userDataPath, `${filename}.backup`));
-            const appConfig = await fs.readJSON(configPath);
-            appConfig.ffmpegPath = data.ffmpegPath;
-            appConfig.ffprobePath = data.ffprobePath;
-            appConfig.danmuFactoryPath = data.danmuFactoryPath;
-            appConfig.mesioPath = data.mesioPath;
-            appConfig.webhook.recoderFolder = data.webhook.recoderFolder;
-            appConfig.recorder.savePath = data.recorder.savePath;
-            appConfig.losslessCutPath = data.losslessCutPath;
-            await fs.writeJSON(filePath, appConfig);
+            const importedConfig = await fs.readJSON(configPath);
+            importedConfig.ffmpegPath = data.ffmpegPath;
+            importedConfig.ffprobePath = data.ffprobePath;
+            importedConfig.danmuFactoryPath = data.danmuFactoryPath;
+            importedConfig.mesioPath = data.mesioPath;
+            importedConfig.bililiveRecorderPath = data.bililiveRecorderPath;
+            importedConfig.audiowaveformPath = data.audiowaveformPath;
+            importedConfig.webhook.recoderFolder = data.webhook.recoderFolder;
+            importedConfig.recorder.savePath = data.recorder.savePath;
+            importedConfig.losslessCutPath = data.losslessCutPath;
+            await fs.writeJSON(filePath, importedConfig);
+            appConfig.getAll();
           }
         } else if (filename === "app.db") {
           // 备份文件
-          db.close();
+          closeDB();
           if (await fs.pathExists(filePath)) {
             await fs.move(filePath, path.join(userDataPath, `${filename}.backup`), {
               overwrite: true,
             });
           }
           await fs.writeFile(filePath, content);
-          db.open();
           reconnectDB();
         } else if (filename.startsWith("cover/")) {
           await fs.writeFile(filePath, content);
@@ -216,7 +279,31 @@ router.post("/import", upload.single("file"), async (ctx) => {
 
 router.post("/notifyTest", async (ctx) => {
   const { title, desp, options, notifyType } = ctx.request.body;
-  await _send(title, desp, options, notifyType);
+  await _send(title, desp, options, notifyType, {
+    context: {
+      event: "notify_test",
+      eventLabel: "测试通知",
+      roomId: "123456",
+      platform: "Bilibili",
+      username: "测试主播",
+      liveTitle: "这是一条测试直播标题",
+      liveId: "live_test_001",
+      roomUrl: "https://live.bilibili.com/123456",
+      taskName: "上传视频：测试文件.mp4",
+      taskType: "upload",
+      taskStatus: "success",
+      taskId: "task_test_001",
+      filename: "test-file.mp4",
+      filePath: "D:/record/test-file.mp4",
+      mediaTitle: "测试稿件",
+      aid: 123456789,
+      startedAt: new Date().toISOString(),
+      endedAt: new Date().toISOString(),
+      durationMs: 3000,
+      error: "",
+      output: "测试输出内容",
+    },
+  });
   ctx.body = "success";
 });
 

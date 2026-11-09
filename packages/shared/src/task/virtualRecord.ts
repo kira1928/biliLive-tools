@@ -3,7 +3,7 @@ import path from "path";
 import axios from "axios";
 
 import logger from "../utils/log.js";
-import { virtualRecordModel } from "../db/index.js";
+import { virtualRecordService } from "../db/index.js";
 import { appConfig } from "../config.js";
 import { sleep } from "../utils/index.js";
 import { readVideoMeta } from "./video.js";
@@ -56,7 +56,6 @@ const extractStartTimeFromFilename = (
   try {
     // 匹配格式如：2025-09-12 17-16-48
     const date = dayjs(filename, ["YYYY-MM-DD_HH-mm-ss", "YYYY-MM-DD HH-mm-ss"]);
-    console.log("匹配时间", filename, date.isValid(), date.toString());
     if (date.isValid()) {
       return date.valueOf();
     }
@@ -122,7 +121,7 @@ const getMatchingFiles = async (
   }
 
   // 读取数据库，排除掉已存在的记录
-  const existingRecords = virtualRecordModel.list();
+  const existingRecords = virtualRecordService.list();
   const existingPathSets = new Set(existingRecords.map((item) => item.path));
   const unprocessedFiles = videoFiles.filter((file) => !existingPathSets.has(file));
 
@@ -145,12 +144,12 @@ const getMatchingFiles = async (
       const startTimeMs = extractStartTimeFromFilename(
         filename,
         config.startTimeAutoMatch,
-        result.value.birthtimeMs,
+        result.value.birthtimeMs || result.value.ctimeMs,
       );
       return (
         result.value.isFile() &&
         startTimeMs > startTime &&
-        Date.now() - result.value.ctimeMs > 5 * 60 * 1000
+        Date.now() - result.value.ctimeMs > 1 * 60 * 1000
       );
     })
     .map((result) => {
@@ -158,7 +157,7 @@ const getMatchingFiles = async (
       const startTimeMs = extractStartTimeFromFilename(
         filename,
         config.startTimeAutoMatch,
-        result.value.birthtimeMs,
+        result.value.birthtimeMs || result.value.ctimeMs,
       );
       return {
         path: result.path,
@@ -284,7 +283,7 @@ const processFile = async (file: FileInfo, config: VirtualRecordConfig, port: nu
     logger.error(`处理文件失败: ${file.path}`, error);
   } finally {
     // 将这次处理的数据添加到数据库
-    virtualRecordModel.add({
+    virtualRecordService.add({
       path: file.path,
     });
   }

@@ -1,31 +1,27 @@
 name: CLI Setup
-description: Install pnpm, setup Node with pnpm cache, and run optional Windows pnpm update.
+description: Install the pinned Node and pnpm versions with a dependency cache.
 runs:
   using: composite
   steps:
+    - name: Install Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version-file: .node-version
+
     - name: Install pnpm
       uses: pnpm/action-setup@v4.1.0
       with:
         run_install: false
 
-    - name: Install Node.js
+    - name: Enable pnpm cache
       uses: actions/setup-node@v4
       with:
         node-version-file: .node-version
         cache: pnpm
         cache-dependency-path: ./pnpm-lock.yaml
 
-    - name: Print node arch (debug) [Windows]
-      if: ${{ runner.os == 'Windows' }}
-      shell: pwsh
-      run: node -p "process.platform + ' ' + process.arch"
-
-    - name: Print node arch (debug) [Unix]
-      if: ${{ runner.os != 'Windows' }}
+    - name: Print runtime versions
       shell: bash
-      run: node -p "process.platform + ' ' + process.arch"
-
-    - name: pnpm-update-for-win
-      if: ${{ runner.os == 'Windows' }}
-      shell: pwsh
-      run: node ./scripts/github-ci-pnpm-update.js
+      run: |
+        node -p "process.version + ' ' + process.platform + ' ' + process.arch"
+        pnpm --version

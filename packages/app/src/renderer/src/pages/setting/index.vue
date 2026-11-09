@@ -1,21 +1,35 @@
 <template>
-  <n-modal v-model:show="showModal" :mask-closable="false" auto-focus :on-after-enter="handleOpen">
+  <n-modal
+    v-model:show="showModal"
+    :mask-closable="false"
+    :on-after-enter="handleOpen"
+    class="setting-modal"
+    :class="breakpoint"
+  >
     <n-card
-      style="width: calc(100% - 60px)"
       :bordered="false"
       size="huge"
       role="dialog"
       aria-modal="true"
       class="card"
+      :style="{
+        width: breakpoint === 'mobile' ? '100%' : 'calc(100% - 60px)',
+      }"
     >
       <n-tabs v-model:value="selectTab" type="bar" animated placement="left" class="setting-tab">
         <n-tab-pane name="common" tab="基本">
-          <n-form ref="formRef" label-placement="left" :label-width="160">
+          <n-form ref="formRef" label-placement="left" :label-width="labelWidth">
+            <n-form-item v-if="!isWeb">
+              <template #label>
+                <Tip text="上传崩溃报告" tip="上传崩溃报告至Sentry服务器"></Tip>
+              </template>
+              <n-switch v-model:value="config.uploadCrashReport" />
+            </n-form-item>
             <n-form-item>
               <template #label>
                 <Tip
                   text="删除至回收站"
-                  tip="关闭后若使用“删除源文件”等选项，文件将被直接删除，不会进入回收站，如果使用的文件为smb等远程协议挂载，可能会删除失败"
+                  tip="关闭后若使用“删除源文件”等选项，文件将被直接删除，不会进入回收站，如果使用的文件为smb等远程协议挂载，可能会删除失败，Docker环境不会生效"
                 ></Tip>
               </template>
               <n-switch v-model:value="config.trash" />
@@ -28,6 +42,12 @@
                 <n-switch v-if="!isWeb" v-model:value="config.autoUpdate" />
                 <n-button type="primary" ghost @click="checkForUpdates">检查更新</n-button>
               </div>
+            </n-form-item>
+            <n-form-item v-if="!isWeb">
+              <template #label>
+                <Tip text="阻止系统休眠" tip="开启后，客户端运行期间系统不会自动进入休眠"></Tip>
+              </template>
+              <n-switch v-model:value="config.preventSystemSleep" />
             </n-form-item>
             <n-form-item v-if="!isWeb">
               <template #label>
@@ -83,9 +103,18 @@
               <n-input v-model:value="config.passKey" type="password" show-password-on="click">
               </n-input>
             </n-form-item>
-            <n-form-item label="主题"
-              ><n-select v-model:value="config.theme" :options="themeOptions" />
+            <n-form-item>
+              <template #label>
+                <span class="inline-flex">
+                  <Tip
+                    text="事件订阅"
+                    :tip="`可以通过webhook接收本软件的事件，具体使用方法请查看文档`"
+                  ></Tip>
+                </span>
+              </template>
+              <n-input v-model:value="config.externalWebhook" placeholder="请输入地址" />
             </n-form-item>
+
             <n-form-item>
               <template #label>
                 <span class="inline-flex">
@@ -175,7 +204,7 @@
                 <template #label>
                   <Tip
                     text="mesio路径"
-                    tip="最新测试过的版本为0.3.2，请先去项目查看文档：https://github.com/hua0512/rust-srec/blob/main/mesio-cli/README.md"
+                    tip="最新测试过的版本为0.4.0，请先去项目查看文档：https://github.com/hua0512/rust-srec/blob/main/mesio-cli/README.md"
                   ></Tip>
                 </template>
                 <n-input v-model:value="config.mesioPath" placeholder="请输入mesio可执行文件路径" />
@@ -185,6 +214,45 @@
                   class="pointer"
                   v-if="!isWeb"
                   @click="selectFile('mesio', config.mesioPath)"
+                >
+                  <FolderOpenOutline />
+                </n-icon>
+              </n-form-item>
+              <n-form-item>
+                <template #label>
+                  <Tip
+                    text="录播姬命令行路径"
+                    tip="并非官方版本，请先去项目下载：https://github.com/renmu123/BililiveRecorder"
+                  ></Tip>
+                </template>
+                <n-input
+                  v-model:value="config.bililiveRecorderPath"
+                  placeholder="请输入bililiveRecorder可执行文件路径"
+                />
+                <n-icon
+                  style="margin-left: 10px"
+                  size="26"
+                  class="pointer"
+                  v-if="!isWeb"
+                  @click="selectFile('bililive', config.bililiveRecorderPath)"
+                >
+                  <FolderOpenOutline />
+                </n-icon>
+              </n-form-item>
+              <n-form-item>
+                <template #label>
+                  <Tip text="audiowaveform路径" tip="根据文档选择对应版本，用于提取音频波形"></Tip>
+                </template>
+                <n-input
+                  v-model:value="config.audiowaveformPath"
+                  placeholder="请输入audiowaveform可执行文件路径"
+                />
+                <n-icon
+                  style="margin-left: 10px"
+                  size="26"
+                  class="pointer"
+                  v-if="!isWeb"
+                  @click="selectFile('audiowaveform', config.audiowaveformPath)"
                 >
                   <FolderOpenOutline />
                 </n-icon>
@@ -221,10 +289,19 @@
                 style="margin-left: 10px"
                 size="26"
                 class="pointer"
+                title="选择文件夹"
                 @click="selectFolder('cache')"
               >
                 <FolderOpenOutline />
               </n-icon>
+              <n-button
+                v-if="!isWeb"
+                style="margin-left: 10px"
+                type="primary"
+                @click="openCacheFolder"
+              >
+                打开
+              </n-button>
             </n-form-item>
             <n-form-item>
               <template #label>
@@ -243,69 +320,75 @@
           </n-form>
         </n-tab-pane>
         <n-tab-pane name="webhook" tab="Webhook">
-          <n-form label-placement="left" :label-width="130">
+          <n-form label-placement="left" :label-width="labelWidth2">
             <n-form-item>
               <template #label>
                 <Tip
-                  text="webhook"
+                  text="webhook总开关"
                   :tip="`如果本软件的录制想使用该功能，请打开录制配置中的发送到webhook选项<br/>其他软件webhook路径：<br/>B站录播姬：http://127.0.0.1:${config.port}/webhook/bililiverecorder<br/>blrec：http://127.0.0.1:${config.port}/webhook/blrec<br/>DDTV：http://127.0.0.1:${config.port}/webhook/ddtv<br/>oneLiveRec：http://127.0.0.1:${config.port}/webhook/oneliverec<br/>自定义（参数见文档）：http://127.0.0.1:${config.port}/webhook/custom <br/>`"
                 ></Tip>
               </template>
               <n-switch v-model:value="config.webhook.open" />
             </n-form-item>
-            <n-form-item>
-              <template #label>
-                <Tip
-                  text="黑名单"
-                  tip="设置后相应直播间的视频不会被处理，用英文逗号分隔，如: 123456,1234567，也可以使用*，代表所有房间号"
-                ></Tip>
-              </template>
-              <n-input
-                v-model:value="config.webhook.blacklist"
-                placeholder="设置需要屏蔽的房间号，用英文逗号分隔"
-              />
-            </n-form-item>
-            <n-form-item label="录播姬工作目录">
-              <template #label>
-                <Tip text="录播姬工作目录" tip="仅当你使用录播姬的webhook时，需要配置此选项"></Tip>
-              </template>
-              <n-input
-                v-model:value="config.webhook.recoderFolder"
-                placeholder="请选择录播姬工作目录"
-              />
-              <n-icon
-                style="margin-left: 10px"
-                size="26"
-                class="pointer"
-                @click="selectFolder('recorder')"
-              >
-                <FolderOpenOutline />
-              </n-icon>
-            </n-form-item>
-            <CommonSetting
-              v-model:data="config.webhook"
-              :biliup-presets-options="presetsOptions"
-              :ffmpeg-options="ffmpegOptions"
-              :global-value="webhookDefaultValue"
-              :global-fields-obj="{}"
-              :syncConfigs="config.sync.syncConfigs"
-              type="global"
-            ></CommonSetting>
+            <template v-if="config.webhook.open">
+              <n-form-item>
+                <template #label>
+                  <Tip
+                    text="黑名单"
+                    tip="设置后相应直播间的视频不会被处理，用英文逗号分隔，如: 123456,1234567，也可以使用*，代表所有房间号"
+                  ></Tip>
+                </template>
+                <n-input
+                  v-model:value="config.webhook.blacklist"
+                  placeholder="设置需要屏蔽的房间号，用英文逗号分隔"
+                />
+              </n-form-item>
+              <n-form-item label="录播姬工作目录">
+                <template #label>
+                  <Tip
+                    text="录播姬工作目录"
+                    tip="仅当你使用录播姬的webhook时，需要配置此选项"
+                  ></Tip>
+                </template>
+                <n-input
+                  v-model:value="config.webhook.recoderFolder"
+                  placeholder="请选择录播姬工作目录"
+                />
+                <n-icon
+                  style="margin-left: 10px"
+                  size="26"
+                  class="pointer"
+                  @click="selectFolder('recorder')"
+                >
+                  <FolderOpenOutline />
+                </n-icon>
+              </n-form-item>
+              <CommonSetting
+                v-model:data="config.webhook"
+                :biliup-presets-options="presetsOptions"
+                :ffmpeg-options="ffmpegOptions"
+                :global-value="webhookDefaultValue"
+                :global-fields-obj="{}"
+                :syncConfigs="config.sync.syncConfigs"
+                type="global"
+                @navigate="navigate"
+              ></CommonSetting>
 
-            <h2 style="display: inline-flex; align-items: center">
-              独立配置<Tip tip="单独设置房间号的上传配置，会覆盖全局配置" :size="22"></Tip>
-            </h2>
-            <!-- <div class="flex" style="align-items: center"> -->
-            <div class="room-list">
-              <span
-                v-for="room in roomList"
-                :key="room.id"
-                class="room"
-                @click="handleRoomDetail(room.id)"
-                >{{ room.id }}<span v-if="room.remark">({{ room.remark }})</span></span
-              >
-              <n-button type="primary" @click="addRoom"> 添加 </n-button>
-            </div>
+              <h2 style="display: inline-flex; align-items: center">
+                独立配置<Tip tip="单独设置房间号的上传配置，会覆盖全局配置" :size="22"></Tip>
+              </h2>
+              <!-- <div class="flex" style="align-items: center"> -->
+              <div class="room-list">
+                <span
+                  v-for="room in roomList"
+                  :key="room.id"
+                  class="room"
+                  @click="handleRoomDetail(room.id)"
+                  >{{ room.id }}<span v-if="room.remark">({{ room.remark }})</span></span
+                >
+                <n-button type="primary" @click="addRoom"> 添加 </n-button>
+              </div>
+            </template>
           </n-form>
         </n-tab-pane>
         <n-tab-pane name="sync" tab="文件同步">
@@ -315,31 +398,38 @@
           <BiliSetting v-model:data="config"></BiliSetting>
         </n-tab-pane>
         <n-tab-pane name="recorder" tab="直播录制">
-          <RecordSetting v-model:data="config"></RecordSetting>
+          <RecordSetting v-model:data="config" @login="handleRecorderLogin"></RecordSetting>
         </n-tab-pane>
         <n-tab-pane name="virtualRecord" tab="虚拟录制">
           <VirtualRecordSetting v-model:data="config"></VirtualRecordSetting>
         </n-tab-pane>
+        <n-tab-pane name="cut" tab="切片">
+          <CutSetting v-model:data="config"></CutSetting>
+        </n-tab-pane>
+        <n-tab-pane name="ai" tab="AI配置">
+          <AISetting v-model:data="config"></AISetting>
+        </n-tab-pane>
         <n-tab-pane name="task" tab="任务">
           <TaskSetting v-model:data="config"></TaskSetting>
         </n-tab-pane>
-        <n-tab-pane name="translate" tab="订阅">
+        <n-tab-pane name="translate" tab="视频订阅">
           <VideoSetting v-model:data="config"></VideoSetting>
         </n-tab-pane>
+
         <!-- <n-tab-pane name="translate" tab="翻译">
           <TranslateSetting v-model:data="config"></TranslateSetting>
         </n-tab-pane> -->
         <n-tab-pane name="notification" tab="通知">
           <NotificationSetting v-model:data="config"></NotificationSetting>
         </n-tab-pane>
-        <n-tab-pane name="other" tab="其他">
+        <n-tab-pane name="other" tab="UI界面">
           <OtherSetting v-model:data="config"></OtherSetting>
         </n-tab-pane>
       </n-tabs>
       <template #footer>
         <div class="footer">
           <n-button class="btn" @click="close">取消</n-button>
-          <n-button type="primary" class="btn" @click="saveConfig"> 确认 </n-button>
+          <n-button type="primary" class="btn" @click="saveConfig"> 保存 </n-button>
         </div>
       </template>
     </n-card>
@@ -356,6 +446,7 @@
     :syncConfigs="config.sync.syncConfigs"
     @save="saveRoomDetail"
     @delete="deleteRoom"
+    @navigate="navigate"
   ></RoomSettingDialog>
 
   <!-- 检查更新弹框 -->
@@ -367,6 +458,7 @@ defineOptions({
   name: "Setting",
 });
 import { useFileDialog } from "@vueuse/core";
+import { useRouter } from "vue-router";
 
 import RoomSettingDialog from "./RoomSettingDialog.vue";
 import CommonSetting from "./CommonWebhookSetting.vue";
@@ -376,7 +468,9 @@ import RecordSetting from "./RecordSetting.vue";
 import TaskSetting from "./TaskSetting.vue";
 import VideoSetting from "./VideoSetting.vue";
 import SyncSetting from "./SyncSetting.vue";
+import CutSetting from "./CutSetting.vue";
 import OtherSetting from "./OtherSetting.vue";
+import AISetting from "./AISetting.vue";
 import VirtualRecordSetting from "./VirtualRecordSetting.vue";
 import CheckUpdateModal from "@renderer/components/checkUpdateModal.vue";
 // import TranslateSetting from "./TranslateSetting.vue";
@@ -388,17 +482,29 @@ import { FolderOpenOutline, Refresh } from "@vicons/ionicons5";
 import { deepRaw } from "@renderer/utils";
 import { showDirectoryDialog } from "@renderer/utils/fileSystem";
 import { videoPresetApi, ffmpegPresetApi, configApi, commonApi } from "@renderer/apis";
+import { useThemeStore } from "@renderer/stores/theme";
+import { useBreakpoints } from "@renderer/hooks/useBreakpoints";
 
-import type { AppConfig, BiliupPreset, AppRoomConfig, Theme } from "@biliLive-tools/types";
+import type { AppConfig, BiliupPreset, AppRoomConfig } from "@biliLive-tools/types";
 
 const notice = useNotification();
+const router = useRouter();
 const appConfigStore = useAppConfig();
 const showModal = defineModel<boolean>({ required: true, default: false });
 const isWeb = computed(() => window.isWeb);
+const { breakpoint, isMobile } = useBreakpoints();
+const labelWidth = computed(() => {
+  return isMobile.value ? "90px" : "150px";
+});
+
+const labelWidth2 = computed(() => {
+  return isMobile.value ? "90px" : "135px";
+});
 
 // @ts-ignore
 const config: Ref<AppConfig> = ref({
   task: {
+    maxNum: 300,
     ffmpegMaxNum: 3,
     douyuDownloadMaxNum: -1,
     biliUploadMaxNum: -1,
@@ -419,14 +525,9 @@ const logLevelOptions = ref<{ label: string; value: any }[]>([
   { label: "error", value: "error" },
 ]);
 
-const themeOptions = ref<{ label: string; value: Theme }[]>([
-  { label: "自动", value: "system" },
-  { label: "浅色", value: "light" },
-  { label: "深色", value: "dark" },
-]);
-
 const confirm = useConfirm();
-const saveConfig = async () => {
+const { setTheme } = useThemeStore();
+const saveConfig = async (): Promise<boolean> => {
   if (
     !isWeb.value &&
     initConfig.value.webhook.recoderFolder &&
@@ -439,7 +540,7 @@ const saveConfig = async () => {
       const [status] = await confirm.warning({
         content: "录播姬目录下应该有一个名为config.json的文件，请确认选择的目录是否正确？",
       });
-      if (!status) return;
+      if (!status) return false;
     }
   }
   // passKey 为空时不保存
@@ -448,15 +549,39 @@ const saveConfig = async () => {
       title: "鉴权密钥不能为空",
       duration: 1000,
     });
-    return;
+    return false;
   }
 
   await configApi.save(deepRaw(config.value));
-  window?.api?.common?.setTheme(config.value.theme);
+  setTheme(config.value.theme);
   // 设置自动启动
   window?.api?.common?.setOpenAtLogin(config.value.autoLaunch || false);
   close();
   appConfigStore.getAppConfig();
+  return true;
+};
+
+const handleRecorderLogin = async (platform: "bilibili" | "douyu") => {
+  const platformName = platform === "bilibili" ? "B站" : "斗鱼";
+  const [status] = await confirm.warning({
+    title: `前往${platformName}登录`,
+    content: `即将保存当前设置并跳转到用户页的${platformName}页面。是否继续？`,
+    positiveText: "保存并跳转",
+    negativeText: "取消",
+  });
+  if (!status) return;
+
+  try {
+    if (!(await saveConfig())) return;
+  } catch (error) {
+    notice.error({
+      title: "保存设置失败",
+      content: error instanceof Error ? error.message : String(error),
+      duration: 3000,
+    });
+    return;
+  }
+  await router.push({ name: "User", query: { tab: platform } });
 };
 
 const close = () => {
@@ -475,7 +600,15 @@ const getConfig = async () => {
  * @param defaultPath 默认地址
  */
 const selectFile = async (
-  type: "ffmpeg" | "ffprobe" | "danmakuFactory" | "losslessCut" | "mesio" | "cache",
+  type:
+    | "ffmpeg"
+    | "ffprobe"
+    | "danmakuFactory"
+    | "losslessCut"
+    | "mesio"
+    | "cache"
+    | "bililive"
+    | "audiowaveform",
   defaultPath: string,
 ) => {
   const files = await window.api.openFile({
@@ -494,6 +627,10 @@ const selectFile = async (
     config.value.losslessCutPath = files[0];
   } else if (type === "mesio") {
     config.value.mesioPath = files[0];
+  } else if (type === "bililive") {
+    config.value.bililiveRecorderPath = files[0];
+  } else if (type === "audiowaveform") {
+    config.value.audiowaveformPath = files[0];
   } else {
     console.error("未知文件类型");
   }
@@ -538,6 +675,13 @@ const selectFolder = async (type: "recorder" | "cache") => {
   }
 };
 
+const openCacheFolder = async () => {
+  const cachePath = await commonApi.getTempPath();
+
+  // 使用系统默认程序打开文件夹
+  window.api.openPath(cachePath);
+};
+
 const handleOpen = async () => {
   await Promise.all([getPresets(), getPresetOptions()]);
   await getConfig();
@@ -577,6 +721,7 @@ const globalFields = ref([
   "title",
   "uploadPresetId",
   "danmu",
+  "burnWithoutDanmu",
   "ffmpegPreset",
   "danmuPreset",
   "autoPartMerge",
@@ -588,12 +733,13 @@ const globalFields = ref([
   "hotProgress",
   "useLiveCover",
   "convert2Mp4",
-  "removeSourceAferrConvert2Mp4",
+  "flvRepair",
   "syncId",
   "afterConvertAction",
   "uploadHandleTime",
   "limitUploadTime",
   "uploadNoDanmu",
+  "uploadToSameMedia",
   "noDanmuVideoPreset",
   "limitVideoConvertTime",
   "videoHandleTime",
@@ -644,6 +790,7 @@ const tempRoomDetail = ref<AppRoomConfig & { id?: string }>({
   uploadPresetId: "",
   remark: "",
   danmu: false,
+  burnWithoutDanmu: false,
   ffmpegPreset: undefined,
   danmuPreset: undefined,
   autoPartMerge: false,
@@ -655,12 +802,13 @@ const tempRoomDetail = ref<AppRoomConfig & { id?: string }>({
   hotProgressColor: "#f9f5f3",
   hotProgressFillColor: "#333333",
   convert2Mp4: false,
-  removeSourceAferrConvert2Mp4: true,
+  flvRepair: false,
   syncId: undefined,
   afterConvertAction: [],
   uploadHandleTime: ["00:00:00", "23:59:59"],
   limitUploadTime: false,
   uploadNoDanmu: false,
+  uploadToSameMedia: false,
   noDanmuVideoPreset: undefined,
   limitVideoConvertTime: false,
   videoHandleTime: ["00:00:00", "23:59:59"],
@@ -780,6 +928,10 @@ const checkForUpdates = async () => {
     await window.api.common.checkUpdate();
   }
 };
+
+const navigate = (tab: string) => {
+  selectTab.value = tab;
+};
 </script>
 
 <style scoped lang="less">
@@ -804,8 +956,17 @@ const checkForUpdates = async () => {
     }
   }
 }
+.setting-modal > :deep(.n-card-content) {
+  padding-bottom: 0 !important;
+  padding-right: 0px !important;
+}
+.setting-modal.mobile > :deep(.n-card-content) {
+  padding-left: 0 !important;
+}
 .setting-tab > :deep(.n-tab-pane) {
   overflow: auto;
-  height: calc(100vh - 200px);
+  height: calc(100vh - 170px);
+  scrollbar-gutter: stable;
+  padding-right: 6px;
 }
 </style>

@@ -1,0 +1,41 @@
+import { createServer } from "node:http";
+import { gzipSync } from "node:zlib";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { HttpClient } from "../src/http.js";
+
+describe("HttpClient.getText", () => {
+  const html = "<html><title>斗鱼直播</title></html>";
+  let receivedCookie: string | undefined;
+  const server = createServer((request, response) => {
+    receivedCookie = request.headers.cookie;
+    response.writeHead(200, {
+      "Content-Encoding": "gzip",
+      "Content-Type": "text/html; charset=utf-8",
+    });
+    response.end(gzipSync(html));
+  });
+  let url: string;
+
+  beforeAll(async () => {
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("测试服务器启动失败");
+    url = `http://127.0.0.1:${address.port}`;
+  });
+
+  afterAll(async () => {
+    await new Promise<void>((resolve, reject) =>
+      server.close((error) => (error ? reject(error) : resolve())),
+    );
+  });
+
+  it("解压 gzip 响应后再解码文本", async () => {
+    await expect(new HttpClient().getText(url)).resolves.toBe(html);
+  });
+
+  it("将默认 Cookie 添加到请求头", async () => {
+    await new HttpClient({ cookie: "acf_uid=123; dy_did=456" }).getText(url);
+
+    expect(receivedCookie).toBe("acf_uid=123; dy_did=456");
+  });
+});

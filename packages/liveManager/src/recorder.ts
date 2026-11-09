@@ -2,10 +2,13 @@ import { Emitter } from "mitt";
 import { ChannelId, Message, Quality } from "./common.js";
 import { RecorderProvider } from "./manager.js";
 import { AnyObject, PickRequired, UnknownObject } from "./utils.js";
-import { Cache } from "./cache.js";
+import type { NamespacedCache } from "./cache.js";
 
-type FormatName = "auto" | "flv" | "hls" | "fmp4" | "flv_only" | "hls_only" | "fmp4_only";
-type CodecName = "auto" | "avc" | "hevc" | "avc_only" | "hevc_only";
+import type { DownloaderType } from "./downloader/index.js";
+import type { XmlStreamStats } from "./xml_stream_controller.js";
+
+export type FormatName = "auto" | "flv" | "hls" | "fmp4" | "flv_only" | "hls_only" | "fmp4_only";
+export type CodecName = "auto" | "avc" | "hevc" | "av1" | "avc_only" | "hevc_only" | "av1_only";
 
 export interface RecorderCreateOpts<E extends AnyObject = UnknownObject> {
   providerId: RecorderProvider<E>["id"];
@@ -30,15 +33,19 @@ export interface RecorderCreateOpts<E extends AnyObject = UnknownObject> {
   // 指定cdn
   source?: string;
   // 该项为用户配置，指定录制的片段时长，单位为秒，如果设置了此项，将按此时长切片录制
-  segment?: number;
+  segment?: string;
   // 保存礼物弹幕
   saveGiftDanma?: boolean;
   // 保存高能弹幕
   saveSCDanma?: boolean;
   /** 保存封面 */
   saveCover?: boolean;
+  /** 转封装为 mp4 */
+  convert2Mp4?: boolean;
   /** 身份验证 */
   auth?: string;
+  /** 抖音 Cookie 使用范围，默认为全部 */
+  cookieMode?: "all" | "stream" | "danma";
   /** cookie所有者uid,B站弹幕录制 */
   uid?: number | string;
   /** 画质匹配重试次数 */
@@ -49,18 +56,37 @@ export interface RecorderCreateOpts<E extends AnyObject = UnknownObject> {
   useM3U8Proxy?: boolean;
   /**B站m3u8代理url */
   m3u8ProxyUrl?: string;
+  /** B站自定义Host，用于替换直播流链接中的host */
+  customHost?: string;
   /** 流格式 */
   formatName?: FormatName;
   /** 流编码 */
   codecName?: CodecName;
-  /** 选择使用的api，虎牙支持: auto,web,mp，抖音支持：web,webHTML,mobile,userHTML */
-  api?: "auto" | "web" | "mp" | "webHTML" | "mobile" | "userHTML";
-  /** 标题关键词，如果直播间标题包含这些关键词，则不会自动录制（仅对斗鱼有效），多个关键词用英文逗号分隔 */
+  /** 选择使用的api，虎牙支持: auto,web,mp,wup，抖音支持：web,webHTML,mobile,userHTML */
+  api?:
+    | "auto"
+    | "web"
+    | "mp"
+    | "wup"
+    | "webHTML"
+    | "mobile"
+    | "userHTML"
+    | "balance"
+    | "random"
+    | "newAPI"
+    | "oldAPI"
+    | string;
+  /** 标题关键词，如果直播间标题包含这些关键词，则不会自动录制，支持两种格式：
+   * 1. 逗号分隔的关键词：'回放,录播,重播'
+   * 2. 正则表达式：'/pattern/flags'（如：'/回放|录播/i'）
+   */
   titleKeywords?: string;
+  /** B站直播间标题变更时分段 */
+  segmentOnTitleChange?: boolean;
   /** 用于指定录制文件格式，auto时，分段使用ts，不分段使用mp4 */
-  videoFormat?: "auto" | "ts" | "mkv";
+  videoFormat?: "auto" | "ts" | "mkv" | "flv";
   /** 录制类型 */
-  recorderType?: "auto" | "ffmpeg" | "mesio";
+  recorderType?: "auto" | "ffmpeg" | "mesio" | "bililive";
   /** 流格式优先级 */
   formatriorities?: Array<"flv" | "hls">;
   /** 只录制音频 */
@@ -71,7 +97,10 @@ export interface RecorderCreateOpts<E extends AnyObject = UnknownObject> {
   useServerTimestamp?: boolean;
   // 可持久化的额外字段，让 provider、manager 开发者可以有更多 customize 的空间
   extra?: Partial<E>;
-  cache: Cache;
+  /** 代理 如http://127.0.0.1:7890 */
+  proxy?: string;
+  /** 调试等级 */
+  debugLevel?: "none" | "basic" | "verbose";
 }
 
 export type SerializedRecorder<E extends AnyObject> = PickRequired<RecorderCreateOpts<E>, "id"> &
@@ -88,29 +117,55 @@ export type SerializedRecorder<E extends AnyObject> = PickRequired<RecorderCreat
     | "segment"
     | "saveSCDanma"
     | "saveCover"
+    | "convert2Mp4"
     | "saveGiftDanma"
     | "disableProvideCommentsWhenRecording"
     | "liveInfo"
     | "uid"
     | "titleKeywords"
+    | "segmentOnTitleChange"
     // | "recordHandle"
   >;
 
-export type RecorderState = "idle" | "recording" | "stopping-record" | "check-error";
+/** 录制状态，idle: 空闲中，recording: 录制中，stopping-record: 停止录制中，check-error: 检查错误，title-blocked: 标题黑名单，charge-skipped: 充电直播(DRM加密)已跳过 */
+export type RecorderState =
+  | "idle"
+  | "recording"
+  | "stopping-record"
+  | "check-error"
+  | "title-blocked"
+  | "charge-skipped";
 export type Progress = { time: string | null };
+
+export interface RecorderTimelineItem {
+  startTime: number;
+  text: string;
+  endTime?: number;
+}
+
+export interface AppendRecorderTimelineArgs {
+  startTime?: number;
+  text: string;
+}
+
+export interface StreamRetryHint {
+  liveId: string;
+  preferAlternativeStream: boolean;
+}
 
 export interface RecordHandle {
   // 表示这一次录制操作的唯一 id
   id: string;
   stream: string;
   source: string;
+  recorderType?: DownloaderType;
   url: string;
-  ffmpegArgs?: string[];
+  downloaderArgs?: string[];
   progress?: Progress;
 
   savePath: string;
 
-  stop: (this: RecordHandle, reason?: string, tempStopIntervalCheck?: boolean) => Promise<void>;
+  stop: (this: RecordHandle, reason?: string) => Promise<void>;
   cut: (this: RecordHandle) => Promise<void>;
 }
 
@@ -119,19 +174,32 @@ export interface DebugLog {
   text: string;
 }
 
-export type GetSavePath = (data: { owner: string; title: string; startTime?: number }) => string;
+export type GetSavePath = (data: {
+  owner: string;
+  title: string;
+  startTime: number;
+  liveStartTime: Date;
+  recordStartTime: Date;
+  extraMs?: boolean;
+}) => string;
 
 export interface Recorder<E extends AnyObject = UnknownObject>
   extends Emitter<{
       RecordStart: RecordHandle;
       RecordSegment?: RecordHandle;
-      videoFileCreated: { filename: string; cover?: string };
-      videoFileCompleted: { filename: string };
+      videoFileCreated: { filename: string; cover?: string; rawFilename?: string };
+      stateChange: {
+        state: RecorderState;
+        msg?: string;
+      };
+      videoFileCompleted: { filename: string; stats?: XmlStreamStats };
       progress: Progress;
       RecordStop: { recordHandle: RecordHandle; reason?: string };
       Updated: (string | keyof Recorder)[];
       Message: Message;
       DebugLog: DebugLog;
+      // 检测到充电直播(付费/DRM 加密直播)
+      ChargeLive: { channelId: string };
     }>,
     RecorderCreateOpts<E> {
   // 这里 id 设计成 string 而不是 string | number，主要是为了方便调用方少做一些类型处理，
@@ -145,8 +213,6 @@ export interface Recorder<E extends AnyObject = UnknownObject>
   usedStream?: string;
   usedSource?: string;
   state: RecorderState;
-  // 默认画质重试次数
-  qualityMaxRetry: number;
   // 画质重试次数上限
   qualityRetry: number;
   // B站弹幕录制，cookie拥有者的uid，抖音的sec_uid
@@ -155,18 +221,23 @@ export interface Recorder<E extends AnyObject = UnknownObject>
     living: boolean;
     owner: string;
     title: string;
-    startTime?: Date;
+    liveStartTime: Date;
     avatar: string;
     cover: string;
     liveId?: string;
+    recordStartTime: Date;
+    area?: string;
+    // 直播类型(各平台可选填，目前仅 B站)：normal/paid/guard/password 等
+    liveType?: string;
+    liveTypeDesc?: string;
+    // 能否录制(在播 && 普通直播 && 可拿到非加密流)
+    canRecord?: boolean;
   };
   tempStopIntervalCheck?: boolean;
-  // TODO: 随机的一条近期弹幕 / 评论，这或许应该放在 manager 层做，上面再加个频率统计之类的
-  // recently comment: { time, text, ... }
-
-  /** 缓存实例引用，由 manager 设置 */
-  cache: Cache;
-
+  timeline?: RecorderTimelineItem[];
+  appendTimeline: (args: AppendRecorderTimelineArgs) => RecorderTimelineItem[];
+  /** 缓存实例（命名空间） */
+  cache: NamespacedCache;
   getChannelURL: (this: Recorder<E>) => string;
 
   // TODO: 这个接口以后可能会拆成两个，因为要考虑有些网站可能会提供批量检查直播状态的接口，比如斗鱼
@@ -176,6 +247,8 @@ export interface Recorder<E extends AnyObject = UnknownObject>
       getSavePath: GetSavePath;
       banLiveId?: string;
       isManualStart?: boolean;
+      /** 上一次使用的流疑似不可用，录制器可在同一场直播中优先尝试备用流 */
+      streamRetryHint?: StreamRetryHint;
     },
   ) => Promise<RecordHandle | null>;
   // 正在进行的录制的操作接口
@@ -191,9 +264,13 @@ export interface Recorder<E extends AnyObject = UnknownObject>
     cover: string;
     channelId: ChannelId;
     living: boolean;
-    startTime: Date;
+    liveStartTime: Date;
+    area: string;
   }>;
-  getStream: (this: Recorder<E>) => Promise<{
+  getStream: (
+    this: Recorder<E>,
+    opts?: { formatName?: FormatName; formatPriorities?: Array<"flv" | "hls"> },
+  ) => Promise<{
     source: string;
     name: string;
     url: string;

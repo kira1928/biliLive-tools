@@ -7,6 +7,7 @@ import { handler, appConfig } from "../index.js";
 import log from "@biliLive-tools/shared/utils/log.js";
 import recorderService from "../services/recorder.js";
 import { parseMeta } from "@biliLive-tools/shared/task/video.js";
+import { sleep } from "@bililive-tools/manager/utils.js";
 
 import type { BlrecEventType } from "../types/blrecEvent.js";
 import type { CloseEvent, OpenEvent, CustomEvent } from "../types/webhook.js";
@@ -33,8 +34,11 @@ router.post("/webhook/bililiverecorder", async (ctx) => {
     }
 
     const roomId = event.EventData.RoomId;
-    // 如果是docker，那么将recoderFolder参数修改为 /app/video路径
-    const recoderFolder = isDocker ? "/app/video" : config.webhook.recoderFolder;
+    let recoderFolder = config.webhook.recoderFolder;
+    if (isDocker && !config.webhook.recoderFolder) {
+      // 如果是docker，且不存在recoderFolder参数，那么修改默认值
+      recoderFolder = "/app/video";
+    }
     const filePath = path.join(recoderFolder, event.EventData.RelativePath);
     log.info("录播姬文件路径：", filePath, recoderFolder);
 
@@ -45,7 +49,8 @@ router.post("/webhook/bililiverecorder", async (ctx) => {
       time: event.EventTimestamp,
       title: event.EventData.Title,
       username: event.EventData.Name,
-      platform: "bili-recorder",
+      platform: "bilibili",
+      software: "bili-recorder",
     });
   }
   ctx.body = "ok";
@@ -85,7 +90,8 @@ router.post("/webhook/blrec", async (ctx) => {
       time: event.date,
       title: masterRes.title,
       username: userRes.info.uname,
-      platform: "blrec",
+      platform: "bilibili",
+      software: "blrec",
     });
   }
   ctx.body = "ok";
@@ -119,21 +125,24 @@ router.post("/webhook/oneliverec", async (ctx) => {
 
     let filePath: string = event.data.output;
     filePath = isDocker ? filePath.replace("/app/rec", "/app/video") : filePath;
+    await sleep(1000);
     const meta = await parseMeta({ videoFilePath: filePath });
 
     const info: {
       roomId: string;
-      platform: "onelivrec";
+      platform: string;
       username: string;
       title: string;
       filePath: string;
       danmuPath?: string;
+      software: string;
     } = {
       roomId: roomId,
       platform: "onelivrec",
       username: meta.username || "未知",
       title: meta.title || "未知",
       filePath: filePath,
+      software: "oneliverec",
     };
     const startTime = new Date((meta.startTimestamp ?? 0) * 1000 || Date.now()).toISOString();
     const nowTime = new Date().toISOString();
@@ -171,18 +180,20 @@ router.post("/webhook/ddtv", async (ctx) => {
 
     const info: {
       roomId: string;
-      platform: "ddtv";
+      platform: string;
       username: string;
       title: string;
       filePath: string;
       danmuPath?: string;
+      software: string;
     } = {
       roomId: String(event.data.RoomId),
-      platform: "ddtv",
+      platform: "bilibili",
       username: event.data.Name,
       title: event.data.Title.Value,
       filePath: files.videoFile,
       danmuPath: files.danmuFile,
+      software: "ddtv",
     };
 
     // 实际为分片结束信号，并不存在开始信号
@@ -270,7 +281,8 @@ router.post("/webhook/custom", async (ctx) => {
       username: event.username,
       coverPath: event?.coverPath,
       danmuPath: event?.danmuPath,
-      platform: "custom",
+      platform: event?.platform || "custom",
+      software: event?.software || "custom",
     });
   }
   ctx.body = "ok";

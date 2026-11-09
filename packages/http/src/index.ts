@@ -1,11 +1,10 @@
-import path from "node:path";
 import http from "node:http";
-import { fileURLToPath } from "node:url";
 import https from "node:https";
 import Koa from "koa";
 import Router from "@koa/router";
 import cors from "@koa/cors";
 import { bodyParser } from "@koa/bodyparser";
+import logger from "@biliLive-tools/shared/utils/log.js";
 
 import errorMiddleware from "./middleware/error.js";
 
@@ -16,29 +15,30 @@ import commonRouter from "./routes/common.js";
 import userRouter from "./routes/user.js";
 import presetRouter from "./routes/preset.js";
 import SSERouter from "./routes/sse.js";
-import recocderRouter from "./routes/recorder.js";
+import recocderRouter, { handleRecorderUpgrade } from "./routes/recorder.js";
 import biliRouter from "./routes/bili.js";
+import douyuRouter from "./routes/douyu.js";
 import taskRouter from "./routes/task.js";
 import assetsRouter from "./routes/assets.js";
 import videoRouter from "./routes/video.js";
 import recordHistoryRouter from "./routes/recordHistory.js";
+import filesRouter from "./routes/files.js";
 import danmaRouter from "./routes/danma.js";
 import syncRouter from "./routes/sync.js";
 import bgoRouter from "./routes/bgo.js";
-import { WebhookHandler } from "./services/webhook.js";
+import aiRouter from "./routes/ai.js";
+import { WebhookHandler } from "./services/webhook/webhook.js";
 import { createFileCache } from "./services/fileCache.js";
 
 import type { GlobalConfig } from "@biliLive-tools/types";
 import type { AwilixContainer } from "awilix";
-import type { AppConfig } from "@biliLive-tools/shared";
+import type { AppConfig, GlobalContainer } from "@biliLive-tools/shared";
 
 export let config: GlobalConfig;
 export let handler!: WebhookHandler;
 export let appConfig!: AppConfig;
-export let container!: AwilixContainer;
+export let container!: AwilixContainer<GlobalContainer>;
 export const fileCache = createFileCache();
-
-export const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const authMiddleware = (passKey: string | number) => {
   return async (ctx: Koa.Context, next: Koa.Next) => {
@@ -77,7 +77,7 @@ const app = new Koa();
 const router = new Router();
 
 router.get("/", async (ctx) => {
-  ctx.body = "Hello World";
+  ctx.body = "Hello biliLive-tools, this is http server! Not for browser use.";
 });
 
 app.use(errorMiddleware);
@@ -98,8 +98,8 @@ export async function serverStart(
 ) {
   container = axContainer;
 
-  config = container.resolve<GlobalConfig>("globalConfig");
-  appConfig = container.resolve<AppConfig>("appConfig");
+  config = container.resolve("globalConfig");
+  appConfig = container.resolve("appConfig");
   handler = new WebhookHandler(appConfig);
 
   if (options.auth) {
@@ -115,12 +115,15 @@ export async function serverStart(
   app.use(presetRouter.routes());
   app.use(recocderRouter.routes());
   app.use(biliRouter.routes());
+  app.use(douyuRouter.routes());
   app.use(taskRouter.routes());
   app.use(videoRouter.routes());
   app.use(recordHistoryRouter.routes());
+  app.use(filesRouter.routes());
   app.use(danmaRouter.routes());
   app.use(syncRouter.routes());
   app.use(bgoRouter.routes());
+  app.use(aiRouter.routes());
 
   app.use(SSERouter.routes());
   app.use(router.allowedMethods());
@@ -141,6 +144,8 @@ export async function serverStart(
 // }
 
 async function createServer(options: { port: number; host: string }) {
+  logger.info(`开始创建服务器: ${options.host}:${options.port}`);
+
   const isHttps = false;
   if (isHttps) {
     // const keys = await createCertificateAsync();
@@ -157,8 +162,18 @@ async function createServer(options: { port: number; host: string }) {
     });
   } else {
     const httpServer = http.createServer(app.callback());
+    httpServer.on("error", (err) => {
+      logger.error("HTTP 服务器错误:", err);
+    });
+    httpServer.on("upgrade", (request, socket, head) => {
+      if (handleRecorderUpgrade(request, socket, head)) {
+        return;
+      }
+
+      socket.destroy();
+    });
     httpServer.listen(options.port, options.host, () => {
-      console.log(`Server is running at http://${options.host}:${options.port}`);
+      logger.info(`Server is running at http://${options.host}:${options.port}`);
     });
   }
 }

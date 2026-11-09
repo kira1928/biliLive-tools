@@ -1,6 +1,6 @@
 {
   "name": "@bililive-tools/manager",
-  "version": "1.6.1",
+  "version": "1.18.0",
   "description": "Batch scheduling recorders",
   "main": "./lib/index.js",
   "type": "module",
@@ -33,18 +33,25 @@
     "scheduling",
     "recorders"
   ],
-  "repository": "https://github.com/renmu123/biliLive-tools",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/renmu123/biliLive-tools",
+    "directory": "packages/liveManager"
+  },
   "author": "renmu123",
   "license": "LGPL",
   "dependencies": {
     "@renmu/fluent-ffmpeg": "2.3.3",
-    "fast-xml-parser": "^4.5.0",
-    "filenamify": "^7.0.0",
-    "mitt": "catalog:",
-    "string-argv": "^0.3.2",
-    "lodash-es": "catalog:",
     "axios": "catalog:",
+    "ejs": "^3.1.10",
+    "fast-xml-parser": "catalog:",
+    "filenamify": "^7.0.0",
     "fs-extra": "^11.2.0",
-    "ejs": "^3.1.10"
+    "lodash-es": "catalog:",
+    "mitt": "catalog:",
+    "string-argv": "^0.3.2"
+  },
+  "devDependencies": {
+    "@types/ejs": "^3.1.5"
   }
 }

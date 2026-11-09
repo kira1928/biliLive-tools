@@ -1,8 +1,11 @@
 import { get } from "lodash-es";
 import { getCookie } from "../task/bili.js";
+import { readDouyuUser } from "./douyu.js";
 
 import type { Recorder } from "@biliLive-tools/types";
 import type { AppConfig } from "../config.js";
+
+type AuthCache = Map<string, string | undefined>;
 
 // 定义独立配置类
 export default class RecorderConfig {
@@ -16,19 +19,47 @@ export default class RecorderConfig {
     return setting.find((setting) => setting.id === id);
   }
 
-  public get(id: string):
+  private getAuth(providerId: "Bilibili" | "DouYu", uid: number, authCache: AuthCache) {
+    const key = `${providerId}:${uid}`;
+    if (authCache.has(key)) return authCache.get(key);
+
+    let auth: string | undefined;
+    try {
+      if (providerId === "Bilibili") {
+        auth = Object.entries(getCookie(uid))
+          .map(([key, value]) => `${key}=${value}`)
+          .join("; ");
+      } else {
+        auth = readDouyuUser(uid)?.loginCookies.main;
+      }
+    } catch (error) {
+      console.error(error);
+    }
+    authCache.set(key, auth);
+    return auth;
+  }
+
+  public get(
+    id: string,
+    opts: { authCache?: AuthCache } = {},
+  ):
     | (Recorder & {
         auth?: string;
         formatPriorities?: Array<"hls" | "flv">;
-        api?: "web" | "webHTML";
       })
     | null {
+    const { authCache = new Map<string, string | undefined>() } = opts;
     const getValue = (key: any): any => {
       if ((setting?.noGlobalFollowFields ?? []).includes(key)) {
         return setting?.[key];
       } else {
         if (key === "uid") {
-          return get(globalConfig, "bilibili.uid");
+          if (setting.providerId === "Bilibili") {
+            return get(globalConfig, "bilibili.uid");
+          } else if (setting.providerId === "DouYu") {
+            return get(globalConfig, "douyu.uid");
+          }
+          return setting?.uid;
         } else if (key === "useM3U8Proxy") {
           return get(globalConfig, "bilibili.useM3U8Proxy");
         } else if (key === "formatName") {
@@ -38,6 +69,8 @@ export default class RecorderConfig {
             return get(globalConfig, "huya.formatName");
           } else if (setting.providerId === "DouYin") {
             return get(globalConfig, "douyin.formatName");
+          } else if (setting.providerId === "TikTok") {
+            return get(globalConfig, "tiktok.formatName");
           } else {
             return "auto";
           }
@@ -50,23 +83,47 @@ export default class RecorderConfig {
             return get(globalConfig, "huya.quality");
           } else if (setting.providerId === "DouYin") {
             return get(globalConfig, "douyin.quality");
+          } else if (setting.providerId === "TikTok") {
+            return get(globalConfig, "tiktok.quality");
           } else {
             return get(globalConfig, "quality");
           }
         } else if (key === "codecName") {
-          return get(globalConfig, "bilibili.codecName");
+          if (setting.providerId === "Bilibili") {
+            return get(globalConfig, "bilibili.codecName");
+          } else if (setting.providerId === "DouYu") {
+            return get(globalConfig, "douyu.codecName");
+          } else if (setting.providerId === "TikTok") {
+            return get(globalConfig, "tiktok.codecName");
+          }
+          return "auto";
         } else if (key === "qualityRetry") {
-          return get(globalConfig, "bilibili.qualityRetry");
+          return get(globalConfig, "qualityRetry");
         } else if (key === "source") {
           return get(globalConfig, "douyu.source");
         } else if (key === "cookie") {
-          return get(globalConfig, "douyin.cookie");
+          if (setting.providerId === "DouYin") {
+            return get(globalConfig, "douyin.cookie");
+          } else if (setting.providerId === "XHS") {
+            return get(globalConfig, "xhs.cookie");
+          } else if (setting.providerId === "TikTok") {
+            return get(globalConfig, "tiktok.cookie");
+          }
+        } else if (key === "cookieMode") {
+          if (setting.providerId === "DouYin") {
+            return get(globalConfig, "douyin.cookieMode");
+          }
         } else if (key === "doubleScreen") {
           if (setting.providerId === "DouYin") {
             return get(globalConfig, "douyin.doubleScreen");
           } else {
             return undefined;
           }
+        } else if (key === "proxy") {
+          if (setting.providerId === "TikTok") {
+            return get(globalConfig, "tiktok.proxy");
+          }
+          return undefined;
         } else if (key === "sourcePriorities") {
           if (setting.providerId === "HuYa") {
             const source = get(globalConfig, "huya.source");
@@ -84,17 +141,34 @@ export default class RecorderConfig {
         } else if (key === "api") {
           if (setting.providerId === "DouYin") {
             return get(globalConfig, "douyin.api");
+          } else if (setting.providerId === "HuYa") {
+            return get(globalConfig, "huya.api");
+          } else if (setting.providerId === "DouYu") {
+            return get(globalConfig, "douyu.api");
+          } else if (setting.providerId === "TikTok") {
+            return get(globalConfig, "tiktok.api");
           } else {
             return "auto";
           }
+        } else if (key === "customHost") {
+          if (setting.providerId === "Bilibili") {
+            return get(globalConfig, "bilibili.customHost");
+          } else {
+            return undefined;
+          }
+        } else if (key === "segmentOnTitleChange") {
+          if (setting.providerId === "Bilibili") {
+            return get(globalConfig, "bilibili.segmentOnTitleChange");
+          }
+          return false;
         } else {
           return get(globalConfig, key);
         }
       }
     };
 
-    const settings = this.appConfig.get("recorders");
-    const globalConfig = this.appConfig.get("recorder");
+    const settings = this.appConfig.get("recorders", true);
+    const globalConfig = this.appConfig.get("recorder", true);
 
     const setting = settings.find((setting) => setting.id === id)!;
     if (!setting) return null;
@@ -102,29 +176,29 @@ export default class RecorderConfig {
     // 授权处理
     let uid: number | string | undefined = undefined;
     let auth: string | undefined;
-    if (setting.providerId === "Bilibili") {
+    if (setting.providerId === "Bilibili" || setting.providerId === "DouYu") {
       uid = getValue("uid");
       if (uid) {
-        try {
-          const cookies = getCookie(Number(uid));
-          auth = Object.entries(cookies)
-            .map(([key, value]) => {
-              return `${key}=${value}`;
-            })
-            .join("; ");
-        } catch (error) {
-          console.error(error);
-        }
+        auth = this.getAuth(setting.providerId, Number(uid), authCache);
       }
     } else if (setting.providerId === "DouYin") {
       auth = getValue("cookie");
       uid = setting?.uid;
+    } else if (setting.providerId === "XHS") {
+      auth = getValue("cookie");
+      uid = setting?.uid;
+    } else if (setting.providerId === "TikTok") {
+      auth = getValue("cookie");
     }
 
     // 流格式处理
     const formatName = getValue("formatName") ?? "auto";
     let formatPriorities: Array<"flv" | "hls"> | undefined;
-    if (setting.providerId === "DouYin" || setting.providerId === "HuYa") {
+    if (
+      setting.providerId === "DouYin" ||
+      setting.providerId === "HuYa" ||
+      setting.providerId === "TikTok"
+    ) {
       if (formatName === "flv_only") {
         formatPriorities = ["flv"];
       } else if (formatName === "hls") {
@@ -147,36 +221,60 @@ export default class RecorderConfig {
         sourcePriorities = getValue("sourcePriorities");
       }
     }
+    let api = getValue("api") ?? "auto";
+
+    // 弹幕处理
+    let disableProvideCommentsWhenRecording =
+      getValue("disableProvideCommentsWhenRecording") ?? true;
+    if (setting.providerId === "XHS") {
+      // 小红书暂不支持弹幕
+      disableProvideCommentsWhenRecording = true;
+    }
 
     return {
       ...setting,
       quality: getValue("quality") ?? "highest",
       line: getValue("line"),
-      disableProvideCommentsWhenRecording: getValue("disableProvideCommentsWhenRecording") ?? true,
+      disableProvideCommentsWhenRecording: disableProvideCommentsWhenRecording,
       saveGiftDanma: getValue("saveGiftDanma") ?? false,
       saveSCDanma: getValue("saveSCDanma") ?? true,
+      saveDanmaStats2DB: getValue("saveDanmaStats2DB") ?? false,
       saveCover: getValue("saveCover") ?? false,
+      convert2Mp4: getValue("convert2Mp4") ?? false,
       segment: getValue("segment") ?? 90,
       uid: uid,
       qualityRetry: getValue("qualityRetry") ?? 0,
       videoFormat: getValue("videoFormat") ?? "auto",
+      debugLevel: getValue("debugLevel") ?? "none",
       recorderType: getValue("recorderType") ?? "ffmpeg",
       auth: auth,
+      cookieMode: getValue("cookieMode") ?? "all",
       useM3U8Proxy: getValue("useM3U8Proxy") ?? false,
+      customHost: getValue("customHost"),
+      segmentOnTitleChange: getValue("segmentOnTitleChange") ?? false,
+      useServerTimestamp: getValue("useServerTimestamp") ?? true,
       formatName: formatName,
       codecName: getValue("codecName") ?? "auto",
       source: getValue("source") ?? "auto",
       formatPriorities: formatPriorities,
       doubleScreen: getValue("doubleScreen"),
       sourcePriorities: sourcePriorities,
-      api: getValue("api") ?? "auto",
+      api: api,
+      proxy: getValue("proxy"),
     };
   }
   public list() {
     const recorders = this.appConfig.get("recorders");
+    const authCache: AuthCache = new Map();
+    for (const uid of Object.keys(this.appConfig.get("bilibiliUser", true) || {})) {
+      this.getAuth("Bilibili", Number(uid), authCache);
+    }
+    for (const uid of Object.keys(this.appConfig.get("douyuUser", true) || {})) {
+      this.getAuth("DouYu", Number(uid), authCache);
+    }
     return recorders
       .map((recorder) => {
-        return this.get(recorder.id);
+        return this.get(recorder.id, { authCache });
       })
       .filter((recorder) => recorder != null);
   }

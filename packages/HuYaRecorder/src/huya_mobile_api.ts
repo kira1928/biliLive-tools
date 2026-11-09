@@ -1,20 +1,12 @@
 // import { createHash, randomInt } from "node:crypto";
 // import { URLSearchParams } from "node:url";
 
-import axios from "axios";
+import { requester } from "./requester.js";
 
 import { utils } from "@bililive-tools/manager";
 import { assert, getFormatSources } from "./utils.js";
 
 import type { StreamResult, StreamProfile } from "./types.js";
-
-const requester = axios.create({
-  timeout: 10e3,
-  headers: {
-    "User-Agent":
-      "Mozilla/5.0 (Linux; Android 5.0; SM-G900P Build/LRX21T) AppleWebKit/537.36 (KHTML, like Gecko)",
-  },
-});
 
 export async function getRoomInfo(
   roomIdOrShortId: string,
@@ -22,6 +14,12 @@ export async function getRoomInfo(
 ) {
   const res = await requester.get(
     `https://mp.huya.com/cache.php?m=Live&do=profileRoom&roomid=${roomIdOrShortId}`,
+    {
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Linux; Android 5.0; SM-G900P Build/LRX21T) AppleWebKit/537.36 (KHTML, like Gecko)",
+      },
+    },
   );
   const html = res.data;
 
@@ -32,10 +30,11 @@ export async function getRoomInfo(
 
   const profile: CacheProfileOnData = html.data;
 
-  const sources = {
+  const sources: StreamResult = {
     flv: [],
     hls: [],
-  } as StreamResult;
+  };
+  // console.log("profile", JSON.stringify(profile, null, 2));
 
   // const uid = await getAnonymousUid();
   for (const item of profile?.stream?.baseSteamInfoList ?? []) {
@@ -50,6 +49,11 @@ export async function getRoomInfo(
       sources.flv.push({
         name: item.sCdnType,
         url,
+        streamName: item.sStreamName,
+        presenterUid: item.lPresenterUid,
+        subChannelId: item.lSubChannelId,
+        channelId: item.lChannelId,
+        suffix: item.sFlvUrlSuffix,
       });
     }
     if (item.sHlsAntiCode && item.sHlsAntiCode.length > 0) {
@@ -57,6 +61,11 @@ export async function getRoomInfo(
       sources.hls.push({
         name: item.sCdnType,
         url,
+        streamName: item.sStreamName,
+        presenterUid: item.lPresenterUid,
+        subChannelId: item.lSubChannelId,
+        channelId: item.lChannelId,
+        suffix: item.sHlsUrlSuffix,
       });
     }
   }
@@ -79,6 +88,7 @@ export async function getRoomInfo(
 
   return {
     living: profile.liveStatus === "ON",
+    api: "mp",
     id: profile.liveData.profileRoom,
     owner: profile.liveData.nick,
     title: profile.liveData.introduction,
@@ -200,6 +210,9 @@ interface CacheProfileOnData {
       sHlsAntiCode: string;
       sHlsUrlSuffix: string;
       newCFlvAntiCode: string;
+      lChannelId: number;
+      lSubChannelId: number;
+      lPresenterUid: number;
     }[];
     hls: {
       multiLine: {

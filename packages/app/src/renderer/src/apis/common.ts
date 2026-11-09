@@ -3,20 +3,6 @@ import configApi from "./config";
 
 import type { DanmuItem } from "@biliLive-tools/types";
 
-export const previewWebhookTitle = async (template: string): Promise<string> => {
-  const res = await request.post(`/common/formatTitle`, {
-    template,
-  });
-  return res.data;
-};
-
-export const previewWebhookPartTitle = async (template: string): Promise<string> => {
-  const res = await request.post(`/common/formatPartTitle`, {
-    template,
-  });
-  return res.data;
-};
-
 export const getStreamLogs = async () => {
   let key = window.localStorage.getItem("key");
   if (!window.isWeb) {
@@ -89,6 +75,7 @@ export const getFiles = async (params: {
     type: "file" | "directory";
     name: string;
     path: string;
+    size?: number;
   }[];
   parent: string;
 }> => {
@@ -102,7 +89,7 @@ export const getFiles = async (params: {
 };
 
 const fileJoin = async (dir: string, name: string): Promise<string> => {
-  const res = await request.post(`/common/fileJoin`, {
+  const res = await request.post(`/files/join`, {
     dir,
     name,
   });
@@ -116,8 +103,19 @@ export async function readXmlTimestamp(filepath: string): Promise<number> {
   return res.data;
 }
 
-export async function parseMeta(files: { videoFilePath?: string; danmaFilePath?: string }) {
-  const res = await request.post("/common/parseMeta", files);
+export async function parseMeta(files: {
+  videoFilePath?: string;
+  danmaFilePath?: string;
+}): Promise<{
+  startTimestamp: number | null;
+  endTimestamp: number | null;
+  roomId: string | null;
+  title: string | null;
+  username: string | null;
+  duration: number;
+  platform: string | null;
+}> {
+  const res = await request.post("/common/parse-video-metadata", files);
   return res.data;
 }
 
@@ -137,7 +135,7 @@ export async function uploadCover(file: File): Promise<{
 }> {
   const formData = new FormData();
   formData.append("file", file);
-  const res = await request.post("/common/cover/upload", formData, {
+  const res = await request.post("/files/cover/upload", formData, {
     headers: {
       "Content-Type": "multipart/form-data",
     },
@@ -150,11 +148,35 @@ export async function appStartTime(): Promise<number> {
   return res.data;
 }
 
-export async function readAss(filepath: string): Promise<string> {
-  const res = await request.post("/common/readAss", {
+export async function appStatistics(): Promise<{
+  startTime: number | null;
+  videoTotalDuaration: number | null;
+  recordingNum: number;
+  recorderNum: number;
+}> {
+  const res = await request.get(`/common/statistics`);
+  return res.data;
+}
+
+export async function readDanma(filepath: string): Promise<string> {
+  const res = await request.post("/common/readDanma", {
     filepath,
   });
   return res.data;
+}
+
+export async function readLLCProject(filepath: string): Promise<string> {
+  const res = await request.post("/common/readLLC", {
+    filepath,
+  });
+  return res.data;
+}
+
+export async function writeLLCProject(filepath: string, content: string): Promise<void> {
+  await request.post("/common/writeLLC", {
+    filepath,
+    content,
+  });
 }
 
 export async function genTimeData(filepath: string): Promise<number[]> {
@@ -171,13 +193,13 @@ export const applyVideoId = async (
   expireAt: number;
   type: string;
 }> => {
-  const res = await request.post(`/common/apply-video-id`, {
+  const res = await request.post(`/common/applyVideoId`, {
     videoPath,
   });
   return res.data;
 };
 
-export const getVideo = async (videoId: string): Promise<string> => {
+export const getVideo = (videoId: string): string => {
   return `${request.defaults.baseURL}/common/video/${videoId}`;
 };
 
@@ -186,11 +208,9 @@ export const parseDanmu = async (
 ): Promise<{
   danmu: DanmuItem[];
   sc: DanmuItem[];
-  hotProgress: {
-    time: number;
-    value: number;
-    color: string;
-  }[];
+  metadata: {
+    video_start_time?: number;
+  };
 }> => {
   const res = await request.post("/common/parseDanmu", {
     filepath,
@@ -243,8 +263,38 @@ export const checkUpdate = async (): Promise<{
   return res.data;
 };
 
+/**
+ * 获取缓存文件夹路径
+ */
+export const getTempPath = async (): Promise<string> => {
+  const res = await request.get("/files/temp");
+  return res.data;
+};
+
+/**
+ * 文件是否存在
+ */
+export const fileExists = async (filepath: string): Promise<boolean> => {
+  const res = await request.post("/files/exists", {
+    filepath,
+  });
+  return res.data;
+};
+
+/**
+ * 获取磁盘空间信息
+ */
+export const getDiskSpace = async (): Promise<{
+  total: number;
+  free: number;
+  used: number;
+  usedPercentage: number;
+}> => {
+  const res = await request.get("/common/diskSpace");
+  return res.data;
+};
+
 const common = {
-  previewWebhookTitle,
   getStreamLogs,
   version,
   versionTest,
@@ -253,13 +303,14 @@ const common = {
   getFontList,
   uploadCover,
   appStartTime,
+  appStatistics,
   getDanmaStream,
   exportLogs,
   getLogContent,
   parseMeta,
   getRunningTaskNum,
   fileJoin,
-  readAss,
+  readDanma,
   genTimeData,
   getVideo,
   applyVideoId,
@@ -268,6 +319,11 @@ const common = {
   handleWebhook,
   whyUploadFailed,
   checkUpdate,
+  getTempPath,
+  readLLCProject,
+  writeLLCProject,
+  fileExists,
+  getDiskSpace,
 };
 
 export default common;

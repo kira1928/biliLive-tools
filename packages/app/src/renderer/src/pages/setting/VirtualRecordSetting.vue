@@ -123,7 +123,7 @@
         </template>
         <n-form
           label-placement="left"
-          :label-width="120"
+          :label-width="labelWidth"
           :model="editingConfig"
           ref="formRef"
           :rules="formRules"
@@ -320,6 +320,41 @@
       </n-card>
     </n-modal>
 
+    <!-- 时间设置模态框 -->
+    <n-modal v-model:show="showTimeModal" :mask-closable="false" auto-focus>
+      <n-card
+        style="width: 500px"
+        :bordered="false"
+        size="huge"
+        role="dialog"
+        aria-modal="true"
+        class="modal-card"
+      >
+        <template #header>
+          <n-text>设置起始时间</n-text>
+        </template>
+        <n-space vertical>
+          <n-text depth="3"> 设置后，只有创建时间在此时间之后的文件才会被处理 </n-text>
+          <n-date-picker
+            v-model:value="selectedStartTime"
+            type="datetime"
+            style="width: 100%"
+            clearable
+            :is-date-disabled="(ts: number) => ts > Date.now()"
+          />
+          <n-text depth="3" style="font-size: 12px">
+            当前选择：{{ formatTime(selectedStartTime) }}
+          </n-text>
+        </n-space>
+        <template #footer>
+          <div class="modal-footer">
+            <n-button @click="showTimeModal = false">取消</n-button>
+            <n-button type="primary" @click="confirmStartTime">确认</n-button>
+          </div>
+        </template>
+      </n-card>
+    </n-modal>
+
     <!-- 测试结果模态框 -->
     <n-modal v-model:show="showTestResult" :mask-closable="false" auto-focus>
       <n-card
@@ -406,7 +441,7 @@
 <script setup lang="ts">
 import { Add, FolderOpenOutline } from "@vicons/ionicons5";
 import { showDirectoryDialog } from "@renderer/utils/fileSystem";
-import { useConfirm } from "@renderer/hooks";
+import { useConfirm, useBreakpoints } from "@renderer/hooks";
 import { uuid, formatTime } from "@renderer/utils";
 import Tip from "@renderer/components/Tip.vue";
 import task from "@renderer/apis/task";
@@ -425,6 +460,10 @@ const notice = useNotice();
 const confirm = useConfirm();
 
 // 模态框相关
+const { isMobile } = useBreakpoints();
+const labelWidth = computed(() => {
+  return isMobile.value ? "90px" : "120px";
+});
 const modalVisible = ref(false);
 const editingIndex = ref<number | null>(null);
 const editingConfig = ref({
@@ -458,6 +497,10 @@ const showTestResult = ref(false);
 
 // 新文件夹路径输入
 const newFolderPath = ref("");
+
+// 时间设置相关
+const showTimeModal = ref(false);
+const selectedStartTime = ref<number>(Date.now());
 
 // 表单引用和验证规则
 const formRef = ref();
@@ -679,13 +722,20 @@ const saveVirtualRecord = async () => {
   }
 };
 
-// 设置起始时间
+// 打开时间设置弹框
 const setStartTime = async () => {
-  config.value.virtualRecord.startTime = Date.now();
-  notice.success({
-    title: "起始时间已更新为当前时间，之前的文件将不会被处理",
-    duration: 5000,
-  });
+  selectedStartTime.value = config.value.virtualRecord.startTime || Date.now();
+  showTimeModal.value = true;
+};
+
+// 确认保存起始时间
+const confirmStartTime = () => {
+  config.value.virtualRecord.startTime = selectedStartTime.value;
+  showTimeModal.value = false;
+  // notice.success({
+  //   title: `起始时间已更新为 ${formatTime(selectedStartTime.value)}，之前的文件将不会被处理`,
+  //   duration: 5000,
+  // });
 };
 </script>
 

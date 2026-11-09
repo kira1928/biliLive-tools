@@ -1,6 +1,6 @@
 <template>
   <div class="container">
-    <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 20px">
+    <div class="filter-container">
       <n-input
         v-model:value="params.name"
         placeholder="备注或房间号"
@@ -15,7 +15,7 @@
         clearable
       />
       <n-select
-        v-model:value="params.recordStatus"
+        v-model:value="params.status"
         :options="statusOptions"
         placeholder="录制状态"
         style="width: 140px"
@@ -48,12 +48,14 @@
           { label: '直播状态', key: 'living' },
           { label: '录制状态', key: 'state' },
           { label: '监听状态', key: 'monitorStatus' },
+          { label: '录制时间', key: 'recordTime' },
         ]"
         @update:field="handleSortFieldChange"
         @update:direction="handleSortDirectionChange"
       />
+      <ColumnSelector v-model="visibleColumns" :columns="columnConfig" />
       <n-button type="warning" @click="getLiveInfo(true)">刷新</n-button>
-      <n-button type="primary" @click="add">添加</n-button>
+      <ButtonGroup :options="actionBtns" @click="handleActionClick">添加</ButtonGroup>
     </div>
 
     <template v-if="list.length > 0">
@@ -62,33 +64,58 @@
         :list="list"
         :sort-field="sortField"
         :sort-directions="sortDirections"
+        :visible-columns="visibleColumns"
         @sort="handleSort"
+        @startRecord="startRecord"
+        @stopRecord="stopRecord"
+        @showDetail="viewStreamerDetail"
       >
+        <template #cornerAction="{ item }">
+          <div class="card-corner-action" @click.stop="viewStreamerDetail(item)">
+            <span class="card-corner-action__label">详情</span>
+          </div>
+        </template>
         <template #action="{ item }">
           <div style="margin-top: 10px" class="section-container">
             <div class="section" @click="startRecord(item.id)">开始录制</div>
-            <div class="section" @click="stopRecord(item.id)">停止录制</div>
-            <div class="section" @click="cut(item.id)" style="display: none">切割</div>
+            <div v-if="item.recordHandle" class="section" @click="stopRecord(item.id)">
+              停止录制
+            </div>
+            <div
+              class="section"
+              @click="cut(item.id)"
+              v-if="item?.recordHandle?.recorderType === 'bililive'"
+            >
+              切割
+            </div>
+            <div
+              class="section"
+              @click="item.disableAutoCheck ? startMonitor(item.id) : stopMonitor(item.id)"
+            >
+              {{ item.disableAutoCheck ? "开始监控" : "停止监控" }}
+            </div>
+            <div class="divider"></div>
             <div class="section" @click="edit(item.id)">直播间设置</div>
             <div class="section" @click="refresh(item.id)">刷新直播间信息</div>
             <div
-              v-if="item.recordHandle?.savePath && false"
+              v-if="item.living"
               class="section"
-              @click="open(item.id, item?.recordHandle?.url)"
+              @click="open(item.id, item.owner || item.remarks)"
             >
-              打开直播
+              观看直播
             </div>
             <div
-              v-if="!isWeb && item.recordHandle?.savePath"
+              v-if="!isWeb"
               class="section"
-              @click="openSavePath(item.recordHandle?.savePath)"
+              @click="openSavePath(item.id, item.recordHandle?.savePath)"
             >
               打开录制文件夹
             </div>
 
             <div class="section" @click="toWebhook(item.channelId)">Webhook配置</div>
-            <div class="section" @click="viewHistory(item)">录制历史</div>
-            <div class="section" style="color: #e88080" @click="remove(item.id)">删除房间</div>
+            <div class="section" @click="viewStreamerDetail(item)">录制详情</div>
+            <div class="section" @click="viewHistory(item)" style="display: none">录制历史</div>
+            <div class="section section-danger" @click="remove(item.id)">删除房间</div>
           </div>
         </template>
       </component>
@@ -101,40 +128,88 @@
           v-model:page-size="recorderLocalParams.pageSize"
           :item-count="pagination.itemCount"
           show-size-picker
-          :page-sizes="[10, 20, 30, 40, 50, 100]"
+          :page-sizes="[10, 20, 30, 40, 50]"
           @update:page="handlePageChange"
           @update:page-size="handlePageSizeChange"
         />
       </div>
     </template>
 
-    <h1 v-else>还木有添加直播捏，添加一个看看吧，支持斗鱼、虎牙、B站、抖音</h1>
+    <h1 v-else>还木有添加直播捏，添加一个看看吧，支持斗鱼、虎牙、B站、抖音、小红书</h1>
 
     <addModal :id="editId" v-model:visible="addModalVisible" @confirm="handleModalClose"></addModal>
-    <videoModal :id="editId" v-model:visible="videoModalVisible" :video-url="videoUrl"></videoModal>
+    <batchAddModal
+      v-model:visible="batchAddModalVisible"
+      @parsed="handleBatchParsed"
+    ></batchAddModal>
+    <batchResultModal
+      v-model:visible="batchResultModalVisible"
+      :results="batchParseResults"
+      @completed="handleBatchCompleted"
+    ></batchResultModal>
+    <batchOperateModal
+      v-model:visible="batchOperateModalVisible"
+      @completed="handleBatchOperateCompleted"
+    ></batchOperateModal>
   </div>
 </template>
 
 <script setup lang="ts">
 import { recoderApi } from "@renderer/apis";
 import { useConfirm } from "@renderer/hooks";
+import { useVisibleColumns } from "@renderer/hooks/useVisibleColumns";
 import addModal from "./components/addModal.vue";
-import videoModal from "./components/videoModal.vue";
+import batchAddModal from "./components/batchAddModal.vue";
+import batchResultModal from "./components/batchResultModal.vue";
+import batchOperateModal from "./components/batchOperateModal.vue";
 import cardView from "./components/cardView.vue";
 import listView from "./components/listView.vue";
 import { useRouter } from "vue-router";
+import ButtonGroup from "@renderer/components/ButtonGroup.vue";
+import ColumnSelector from "@renderer/components/ColumnSelector.vue";
+import { platformOptions } from "./data";
+import SortButton from "./components/SortButton.vue";
 
 import { useEventListener, useStorage } from "@vueuse/core";
 import eventBus from "@renderer/utils/eventBus";
+import { toLiveVideoPlayerPage } from "@renderer/utils/pages";
 
 import type { RecorderAPI } from "@biliLive-tools/http/types/recorder.js";
-import SortButton from "./components/SortButton.vue";
 
 defineOptions({
   name: "recorder",
 });
 
 type SortField = "living" | "state" | "monitorStatus";
+type LiveInfoItem = RecorderAPI["getLiveInfo"]["Resp"][number];
+type RecorderItem = RecorderAPI["getRecorders"]["Resp"]["data"][number];
+type LiveInfoCacheEntry = {
+  data: LiveInfoItem;
+  expiresAt: number;
+};
+
+const LIVE_INFO_CACHE_TTL = 20 * 60 * 1000;
+const LIVE_INFO_CACHE_STORAGE_KEY = "recorder-live-info-cache";
+
+// 列配置
+const columnConfig = [
+  { value: "channelId", label: "房间号" },
+  { value: "owner", label: "主播名" },
+  { value: "remark", label: "备注" },
+  { value: "roomTitle", label: "标题" },
+  { value: "living", label: "直播状态" },
+  { value: "state", label: "录制状态" },
+  { value: "recordParams", label: "录制参数" },
+  { value: "lastRecordTime", label: "上次录制" },
+  { value: "monitorStatus", label: "监听状态" },
+  { value: "actions", label: "操作" },
+];
+
+// 使用可见列 hook
+const { visibleColumns } = useVisibleColumns({
+  columns: columnConfig,
+  storageKey: "recorder-list-visible-columns",
+});
 
 const notice = useNotice();
 const router = useRouter();
@@ -152,38 +227,28 @@ const recorderLocalParams = useStorage(
 
 const params = ref<Parameters<typeof recoderApi.infoList>[0]>({
   platform: undefined,
-  recordStatus: undefined,
+  status: undefined,
   name: undefined,
   autoCheck: undefined,
   page: 1,
 });
 
-const platformOptions = ref([
-  {
-    label: "斗鱼",
-    value: "DouYu",
-  },
-  {
-    label: "B站",
-    value: "Bilibili",
-  },
-  {
-    label: "虎牙",
-    value: "HuYa",
-  },
-  {
-    label: "抖音",
-    value: "DouYin",
-  },
-]);
 const statusOptions = ref([
   {
     label: "录制中",
     value: "recording",
   },
   {
-    label: "未录制",
-    value: "unrecorded",
+    label: "空闲中",
+    value: "idle",
+  },
+  {
+    label: "检查错误",
+    value: "check-error",
+  },
+  {
+    label: "标题被屏蔽",
+    value: "title-blocked",
   },
 ]);
 const recordOptions = ref([
@@ -257,17 +322,84 @@ const pagination = ref({
   itemCount: 0,
 });
 
+const readLiveInfoCache = (): Record<string, LiveInfoCacheEntry> => {
+  const rawValue = localStorage.getItem(LIVE_INFO_CACHE_STORAGE_KEY);
+  if (!rawValue) return {};
+
+  try {
+    const parsedValue = JSON.parse(rawValue);
+    return parsedValue && typeof parsedValue === "object" ? parsedValue : {};
+  } catch {
+    localStorage.removeItem(LIVE_INFO_CACHE_STORAGE_KEY);
+    return {};
+  }
+};
+
+const writeLiveInfoCache = (cache: Record<string, LiveInfoCacheEntry>) => {
+  localStorage.setItem(LIVE_INFO_CACHE_STORAGE_KEY, JSON.stringify(cache));
+};
+
+const getValidCachedLiveInfo = (recorderId: string) => {
+  const liveInfoCache = readLiveInfoCache();
+  const cacheEntry = liveInfoCache[recorderId];
+  if (!cacheEntry) return undefined;
+  if (cacheEntry.expiresAt > Date.now()) {
+    return cacheEntry.data;
+  }
+
+  const nextCache = { ...liveInfoCache };
+  delete nextCache[recorderId];
+  writeLiveInfoCache(nextCache);
+  return undefined;
+};
+
+const updateLiveInfoCache = (recorders: RecorderItem[], items: LiveInfoItem[]) => {
+  if (recorders.length === 0 || items.length === 0) return;
+
+  const itemsByChannelId = new Map(items.map((item) => [item.channelId, item]));
+  const nextCache = { ...readLiveInfoCache() };
+  const expiresAt = Date.now() + LIVE_INFO_CACHE_TTL;
+  let changed = false;
+
+  recorders.forEach((recorder) => {
+    const liveInfo = itemsByChannelId.get(recorder.channelId);
+    if (!liveInfo) return;
+    nextCache[recorder.id] = {
+      data: liveInfo,
+      expiresAt,
+    };
+    changed = true;
+  });
+
+  if (changed) {
+    writeLiveInfoCache(nextCache);
+  }
+};
+
+const mergeLiveInfos = (recorders: RecorderItem[], ...sources: LiveInfoItem[][]) => {
+  const liveInfoByChannelId = new Map<string, LiveInfoItem>();
+
+  sources.flat().forEach((item) => {
+    liveInfoByChannelId.set(item.channelId, item);
+  });
+
+  return recorders
+    .map((recorder) => liveInfoByChannelId.get(recorder.channelId))
+    .filter((item): item is LiveInfoItem => Boolean(item));
+};
+
 const list = computed(() => {
   // 后端已经处理了排序，前端只需要合并直播信息
   const mappedList = recorderList.value.map((item) => {
     const liveInfo = liveInfos.value.find((liveInfo) => liveInfo.channelId === item.channelId);
     return {
       ...item,
-      cover: liveInfo?.cover,
-      owner: liveInfo?.owner,
-      avatar: liveInfo?.avatar ?? item?.extra?.avatar,
-      roomTitle: liveInfo?.title,
+      cover: item?.liveInfo?.cover || liveInfo?.cover,
+      owner: item?.liveInfo?.owner || liveInfo?.owner,
+      avatar: item?.liveInfo?.avatar || liveInfo?.avatar || item?.extra?.avatar,
+      roomTitle: item?.liveInfo?.title || liveInfo?.title,
       living: item?.liveInfo?.living ?? liveInfo?.living,
+      area: item?.liveInfo?.area || liveInfo?.area,
     };
   });
 
@@ -307,9 +439,22 @@ const getList = async () => {
 };
 
 const addModalVisible = ref(false);
+const batchAddModalVisible = ref(false);
+const batchResultModalVisible = ref(false);
+const batchParseResults = ref<any[]>([]);
+const batchOperateModalVisible = ref(false);
+
 const add = async () => {
   editId.value = "";
   addModalVisible.value = true;
+};
+
+const batchAdd = async () => {
+  batchAddModalVisible.value = true;
+};
+
+const batchOperate = async () => {
+  batchOperateModalVisible.value = true;
 };
 
 const confirm = useConfirm();
@@ -337,6 +482,22 @@ const stopRecord = async (id: string) => {
 
 const cut = async (id: string) => {
   await recoderApi.cut(id);
+};
+
+const startMonitor = async (id: string) => {
+  await recoderApi.update(id, { id, disableAutoCheck: false } as any);
+  notice.success({
+    title: "已开始监控",
+  });
+  await recoderApi.startRecord(id);
+  getList();
+};
+
+const stopMonitor = async (id: string) => {
+  await recoderApi.update(id, { id, disableAutoCheck: true } as any);
+  notice.success({
+    title: "已停止监控",
+  });
   getList();
 };
 
@@ -346,42 +507,89 @@ const edit = async (id: string) => {
   addModalVisible.value = true;
 };
 
-const videoModalVisible = ref(false);
-const videoUrl = ref("");
 /**
  * 打开直播间
  * @param id 内部直播间id
+ * @param owner 直播间主人名
  */
-const open = async (id: string, streamUrl: string) => {
-  editId.value = id;
-  videoUrl.value = streamUrl;
-  if (!streamUrl) {
-    notice.error({
-      title: "未找到直播流地址",
+const open = async (id: string, owner: string) => {
+  const info = await refresh(id, false);
+  if (info?.living === false) {
+    notice.warning({
+      title: "直播间未开播",
     });
     return;
   }
-  videoModalVisible.value = true;
+  toLiveVideoPlayerPage({
+    liveId: id,
+    owner: owner,
+  });
 };
 
 const getLiveInfo = async (forceRequest: boolean = false) => {
-  if (recorderList.value.length === 0) return;
-  const ids = recorderList.value.map((item) => item.id);
-  liveInfos.value = await recoderApi.getLiveInfo(ids, forceRequest);
+  if (recorderList.value.length === 0) {
+    liveInfos.value = [];
+    return;
+  }
+
+  const currentRecorders = recorderList.value;
+
+  if (forceRequest) {
+    const fetchedInfos = await recoderApi.getLiveInfo(
+      currentRecorders.map((item) => item.id),
+      true,
+    );
+    updateLiveInfoCache(currentRecorders, fetchedInfos);
+    liveInfos.value = mergeLiveInfos(currentRecorders, fetchedInfos);
+    return;
+  }
+
+  const cachedInfos: LiveInfoItem[] = [];
+  const missingRecorders: RecorderItem[] = [];
+
+  currentRecorders.forEach((recorder) => {
+    const cachedLiveInfo = getValidCachedLiveInfo(recorder.id);
+    if (cachedLiveInfo) {
+      cachedInfos.push(cachedLiveInfo);
+      return;
+    }
+    missingRecorders.push(recorder);
+  });
+
+  let fetchedInfos: LiveInfoItem[] = [];
+  if (missingRecorders.length > 0) {
+    fetchedInfos = await recoderApi.getLiveInfo(
+      missingRecorders.map((item) => item.id),
+      false,
+    );
+    updateLiveInfoCache(missingRecorders, fetchedInfos);
+  }
+
+  liveInfos.value = mergeLiveInfos(currentRecorders, cachedInfos, fetchedInfos);
 };
 
 // 刷新单个直播间信息
-const refresh = async (id: string) => {
+const refresh = async (id: string, showNotification: boolean = true) => {
+  const recorder = recorderList.value.find((item) => item.id === id);
+  if (!recorder) return;
+
   const data = await recoderApi.getLiveInfo([id], true);
-  liveInfos.value = liveInfos.value.map((item) => {
-    if (item.channelId === id) {
-      return data[0];
-    }
-    return item;
-  });
-  notice.success({
-    title: "刷新成功",
-  });
+  const refreshedLiveInfo = data.find((item) => item.channelId === recorder.channelId) || data[0];
+
+  if (refreshedLiveInfo) {
+    updateLiveInfoCache([recorder], [refreshedLiveInfo]);
+    liveInfos.value = mergeLiveInfos(
+      recorderList.value,
+      liveInfos.value.filter((item) => item.channelId !== recorder.channelId),
+      [refreshedLiveInfo],
+    );
+  }
+  if (showNotification) {
+    notice.success({
+      title: "刷新成功",
+    });
+  }
+  return refreshedLiveInfo;
 };
 
 const handleModalClose = () => {
@@ -391,9 +599,24 @@ const handleModalClose = () => {
   }
 };
 
+const handleBatchParsed = (results: any[]) => {
+  batchParseResults.value = results;
+  batchResultModalVisible.value = true;
+};
+
+const handleBatchCompleted = () => {
+  // 刷新列表
+  init();
+};
+
+const handleBatchOperateCompleted = async () => {
+  // 刷新列表
+  await getList();
+};
+
 const init = async () => {
   await getList();
-  await getLiveInfo();
+  getLiveInfo(false);
 };
 
 init();
@@ -413,20 +636,13 @@ function cleanInterval() {
   intervalId = null;
 }
 
-// 十分钟更新一次直播间信息
-setInterval(
-  () => {
-    getLiveInfo();
-  },
-  10 * 60 * 1000,
-);
-
 onDeactivated(() => {
   cleanInterval();
 });
 
 onActivated(() => {
   createInterval();
+  getLiveInfo(false);
 });
 
 // 在模块失活时清除定时器
@@ -452,10 +668,23 @@ const isWeb = ref(window.isWeb);
 
 /**
  * 打开录制文件夹
- * @param path
+ * @param id 录制器ID
+ * @param recordingPath 录制文件路径
  */
-const openSavePath = (path: string) => {
-  window.api.openPath(window.path.dirname(path));
+const openSavePath = async (id: string, recordingPath?: string) => {
+  if (recordingPath) {
+    await window.api.openPath(window.path.dirname(recordingPath));
+    return;
+  }
+
+  try {
+    const { folderPath } = await recoderApi.getRecentRecordFolder(id);
+    await window.api.openPath(folderPath);
+  } catch (error: any) {
+    notice.error({
+      title: error?.message,
+    });
+  }
 };
 
 const toWebhook = (channelId: string) => {
@@ -478,6 +707,16 @@ const viewHistory = (item: any) => {
       id: item.id,
       channelId: item.channelId,
       platform: item.providerId,
+      name: item.owner,
+    },
+  });
+};
+
+const viewStreamerDetail = (item: any) => {
+  router.push({
+    path: "/streamerDetail",
+    query: {
+      recorderId: item.id,
       name: item.owner,
     },
   });
@@ -537,6 +776,24 @@ const handleSortDirectionChange = (direction: "asc" | "desc") => {
   }
   getList();
 };
+
+const actionBtns = ref([
+  { label: "批量添加", key: "batchAdd" },
+  { label: "批量操作", key: "batchOperate" },
+]);
+const handleActionClick = (key?: string | number) => {
+  switch (key) {
+    case "batchAdd":
+      batchAdd();
+      break;
+    case "batchOperate":
+      batchOperate();
+      break;
+    case undefined:
+      add();
+      break;
+  }
+};
 </script>
 
 <style scoped lang="less">
@@ -549,12 +806,34 @@ const handleSortDirectionChange = (direction: "asc" | "desc") => {
     cursor: pointer;
     display: inline-block;
     &:hover {
-      background-color: #eee;
-      @media screen and (prefers-color-scheme: dark) {
-        background-color: rgba(255, 255, 255, 0.09);
-      }
+      background-color: var(--bg-hover);
+    }
+
+    &.section-danger {
+      color: var(--color-danger-text);
     }
   }
+}
+.filter-container {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  background: var(--n-color);
+  padding-bottom: 15px;
+}
+@media (max-width: 1024px) {
+  .filter-container {
+    flex-wrap: wrap;
+  }
+}
+
+.divider {
+  height: 1px;
+  background-color: var(--bg-hover);
+  margin: 4px 0;
 }
 .sort-buttons {
   display: flex;

@@ -38,17 +38,19 @@ interface Options {
   sourcePriorities: []; // 废弃
   formatPriorities?: string[]; // 支持，`flv`和`hls` 参数，默认为['flv','hls']
   disableAutoCheck?: boolean; // 为 true 时 manager 将跳过自动检查
-  segment?: number; // 分段参数，单位分钟
+  segment?: number | string; // 分段参数，单位分钟，如果以"B","KB","MB","GB"结尾，会尝试使用文件大小分段，仅推荐在使用mesio录制引擎时使用
   disableProvideCommentsWhenRecording?: boolean; // 禁用弹幕录制
   saveGiftDanma?: boolean; // 保存礼物弹幕
   saveCover?: boolean; // 保存封面
   videoFormat?: "auto"; // 视频格式： "auto", "ts", "mkv" ，auto模式下, 分段使用 "ts"，不分段使用 "mp4"
   useServerTimestamp?: boolean; // 控制弹幕是否使用服务端时间戳，默认为true
   doubleScreen?: boolean; // 是否使用双屏直播流，开启后如果是双屏直播，那么就使用拼接的流，默认为true
-  recorderType?: "auto" | "ffmpeg" | "mesio"; // 底层录制器，使用mesio时videoFormat参数无效
+  recorderType?: "auto" | "ffmpeg" | "mesio" | "bililive"; // 底层录制器，使用mesio和bililive时videoFormat参数无效
   auth?: string; // 传递cookie
   uid?: string; // 参数为 sec_user_uid 参数
   api?: "web" | "webHTML" | "mobile" | "userHTML" | "balance" | "random"; // 使用不同的接口，默认使用web，具体区别见文档
+  titleKeywords?: string; // 禁止录制的标题关键字，英文逗号分开多个
+  debugLevel?: `verbose` | "basic"; // verbose参数时，录制器会输出更加详细的log
 }
 ```
 
@@ -82,14 +84,14 @@ const { id } = await provider.resolveChannelInfoFromURL(url);
 
 `mobile` 及 `userHTML` 必须传入 `uid` 参数
 
-| 描述             | 备注                                     |
-| ---------------- | ---------------------------------------- |
-| web直播间接口    | 效果不错                                 |
-| mobile直播间接口 | 不易风控，无验证码，海外IP可能无法使用   |
-| 直播间web解析    | 易风控，有验证码，单个接口1M流量         |
-| 用户web解析      | 不易风控，海外IP无法使用，单个接口1M流量 |
-| 负载均衡         | 使用负载均衡算法来分摊防止风控           |
-| 随机             | 从几个接口里挑一个                       |
+| 描述             | 备注                                                   |
+| ---------------- | ------------------------------------------------------ |
+| web直播间接口    | 效果不错                                               |
+| mobile直播间接口 | 不易风控，无验证码，海外IP可能无法使用，不会应用Cookie |
+| 直播间web解析    | 易风控，有验证码，单个接口1M流量                       |
+| 用户web解析      | 不易风控，海外IP无法使用，单个接口1M流量               |
+| 负载均衡         | 使用负载均衡算法来分摊防止风控                         |
+| 随机             | 从几个接口里挑一个                                     |
 
 # 协议
 

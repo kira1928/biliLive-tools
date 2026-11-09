@@ -1,0 +1,62 @@
+import request from "./request";
+
+const asrRecognize = async () => {
+  const res = await request.post("/ai/asr");
+  return res.data;
+};
+
+const llm = async (message: string, systemPrompt?: string) => {
+  const res = await request.post("/ai/llm", {
+    message,
+    systemPrompt,
+  });
+  return res.data;
+};
+
+const songRecognize = async (
+  file: string,
+  startTime: number,
+  endTime: number,
+): Promise<{
+  lyrics: string;
+  name: string;
+}> => {
+  const res = await request.post("/ai/song-recognize", {
+    file,
+    startTime,
+    endTime,
+  });
+  return res.data;
+};
+
+const subtitleRecognize = async (
+  file: string,
+  startTime: number,
+  endTime: number,
+  modelId: string,
+  options?: {
+    offset?: number;
+    song?: boolean;
+  },
+): Promise<{
+  srt: string;
+}> => {
+  const res = await request.post("/ai/subtitle", {
+    file,
+    modelId,
+    startTime,
+    endTime,
+    offset: options?.offset,
+    song: options?.song,
+  });
+  return res.data;
+};
+
+const ai = {
+  asrRecognize,
+  llm,
+  songRecognize,
+  subtitleRecognize,
+};
+
+export default ai;
